@@ -8,90 +8,50 @@
 
 ```text
 ai-metronome/
-├── .agents/              # Agent operating rules and workflow specifications
-├── docs/                 # Documentation and architecture design specifications
+├── .agents/                        # Agent operating rules and workflow specifications
+├── archive/
+│   └── puck/                       # Archived Puck.js BLE CLI/TUI prototype & tests
+├── docs/                           # Documentation and architecture design specifications
 ├── src/
-│   └── ai_metronome/     # Core application package
-├── tools/
-│   └── puck_cli/         # Windows BLE CLI & lightweight console for Puck.js devices
-├── tests/                # Automated test suites
-├── AGENTS.md             # Universal agent operating guidelines
-├── JOURNAL.md            # Chronological log & Architectural Decision Records (ADRs)
-├── PLANNING.md           # Active backlog & sprint task tracking
-├── ROADMAP.md            # Long-term vision and feature backlog
-├── TESTING.md            # Testing strategy and execution guide
-├── pyproject.toml        # Project metadata and dependencies
-└── main.py               # Application entry point
+│   ├── ai_metronome/               # Host-testable core algorithms (PDM click detector)
+│   └── xiao_nrf52840_sense/        # Target MCU firmware implementations
+│       ├── circuitpython/
+│       │   └── code.py             # Self-contained CircuitPython click detector POC
+│       ├── cpp/                    # Planned C++ firmware implementation
+│       └── rust/                   # Planned Rust firmware implementation
+├── tests/                          # Automated unit test suites
+├── tools/                          # Developer and deployment utilities
+├── AGENTS.md                       # Universal agent operating guidelines
+├── JOURNAL.md                      # Chronological log & Architectural Decision Records (ADRs)
+├── PLANNING.md                     # Active backlog & sprint task tracking
+├── ROADMAP.md                      # Long-term vision and feature backlog
+├── TESTING.md                      # Testing strategy and execution guide
+├── pyproject.toml                  # Project metadata and dependencies
+└── main.py                         # Application entry point
 ```
 
 ---
 
-## Developer Setup
+## XIAO nRF52840 Sense — CircuitPython POC (`v1`)
 
-### Prerequisites
-- Python 3.12+
-- [`uv`](https://docs.astral.sh/uv/) package manager
+### Deploying to the Board
+Copy [`src/xiao_nrf52840_sense/circuitpython/code.py`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/circuitpython/code.py) directly to the root of your `CIRCUITPY` USB drive as `code.py`:
 
-### Installation
+```powershell
+Copy-Item src\xiao_nrf52840_sense\circuitpython\code.py D:\code.py -Force
+```
+*(Replace `D:` with your `CIRCUITPY` drive letter. Requires zero external `/lib` dependencies.)*
 
-1. Clone or navigate to the repository directory.
-2. Synchronize the virtual environment:
-   ```bash
-   uv sync
-   ```
+### Onboard RGB LED Status Guide
+- **Solid / Blinking Blue**: Initializing hardware, verifying battery & thermal rails, waking `board.MIC_PWR`, verifying `PDMIn` DMA stream, and calibrating ambient room noise floor.
+- **3 Green Blinks**: Initialization & microphone verification **OK** — ready and listening.
+- **Red Flash**: **Click detected!** Blinks in real time with each detected metronome click and logs peak, noise floor, and estimated BPM over USB Serial (`115200` baud).
+- **Alternating Red / Blue**: Hardware fault detected during microphone initialization.
 
 ---
 
-## Puck.js BLE Tool (`tools/puck_cli`)
+## Running Unit Tests
 
-A fast, lightweight Windows BLE CLI and interactive console for connecting, deploying, iterating, and diagnosing Puck.js devices over Nordic UART Service (NUS).
-
-### Windows Bluetooth Setup
-Before first connection, pair your Puck.js in Windows:
-> **Windows Settings** -> **Bluetooth & devices** -> **Add device** -> **Bluetooth** -> select your Puck.js (e.g. `Puck.js d3ad`).
-
-### Interactive Console
 ```bash
-uv run puck
-# Or connect directly to a specific device:
-uv run puck -d d3ad
-```
-
-Inside the console:
-- Type `help` or `?` for operational commands.
-- Type `q`, `quit`, or `exit` to exit cleanly at any prompt.
-- Type any JavaScript directly to run it on the device (e.g., `LED1.set()`, `Puck.mag()`, `E.getBattery()`).
-- Type `scan` to refresh nearby Puck devices, or `connect <#|name>` to switch devices.
-- Type `diag` to view battery, temperature, firmware version, and free memory.
-- Type `upload <file.js>` to deploy code to RAM.
-
-### Agent & Script CLI (Structured JSON Mode)
-```bash
-# Scan for nearby Puck.js devices
-uv run puck scan --json
-
-# Set default device for subsequent commands
-uv run puck use d3ad
-
-# Execute a JavaScript expression and capture result
-uv run puck exec "E.getTemperature()" --json
-uv run puck exec -d d3ad "LED1.set()" --json
-
-# Deploy a script to RAM
-uv run puck deploy script.js --json
-
-# Query device diagnostics (battery, temp, firmware version, memory)
-uv run puck diag -d d3ad --json
-
-# Reset Puck.js RAM state
-uv run puck reset -d d3ad
-```
-
----
-
-## Running Tests
-
-Execute test suite with pytest via `uv`:
-```bash
-uv run pytest
+uv run pytest -v
 ```

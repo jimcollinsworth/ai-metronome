@@ -12,11 +12,12 @@ Strategic proposals, architecture ideas, and long-term roadmap for `ai-metronome
 
 ## 2. Milestone Proposals
 
-### Phase 0: Hardware Tooling & AI Agent Bridge (Puck.js / Espruino / BLE)
-- **BLE Connection & Debug CLI**: Reliable Windows CLI and TUI tooling using native WinRT BLE (`bleak`) to scan, pair, connect, and debug Puck.js and Espressif/Espruino devices without driver headaches.
-- **Dynamic AI Interaction & REPL**: Leverage the dynamic JavaScript console on Puck.js for interactive coding, speech/AI commands, and real-time execution.
-- **AI Task-to-Device Loop**: Enable AI agents to take natural language task descriptions, author Espruino JavaScript, push code over BLE NUS, and verify runtime behavior directly on the device.
-- **BLE Firmware & Protocol Investigation**: Investigate custom/optimized firmware coding to maximize BLE throughput, battery longevity, and low-latency metronome timing synchronization.
+### Phase 0: Hardware Target & Multi-Language MCU Progression (XIAO nRF52840 Sense)
+- **Target Hardware**: Seeed Studio XIAO nRF52840 Sense (64 MHz Cortex-M4F, onboard digital PDM MEMS microphone, 6-axis IMU, RGB LED, BLE 5.0).
+- **Stage 1 — CircuitPython POC**: Rapid prototyping of hardware initialization, PDM microphone health checks, adaptive high-pass click detection, and visual LED beat synchronization (`src/xiao_nrf52840_sense/circuitpython/code.py`).
+- **Stage 2 — C++ Firmware**: Porting the audio DMA capture and onset detection pipeline to C++ for deterministic sub-millisecond interrupt timing and full hardware peripheral access (`src/xiao_nrf52840_sense/cpp/`).
+- **Stage 3 — Rust Firmware**: Evaluating an embedded Rust (`embassy-nrf` / `nrf52840-hal`) implementation for memory-safe, zero-cost async audio DSP and BLE telemetry (`src/xiao_nrf52840_sense/rust/`).
+- **Archived Exploration (`archive/puck/`)**: Initial Puck.js BLE console prototype archived after determining an onboard microphone is essential.
 
 ### Phase 1: Core Engine & Timing Architecture
 - [Placeholder: timing loop, rhythm generation, or audio engine requirements]

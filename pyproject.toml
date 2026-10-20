@@ -13,7 +13,6 @@ dependencies = [
 
 [project.scripts]
 ai-metronome = "ai_metronome:main"
-puck = "tools.puck_cli.cli:main"
 
 [dependency-groups]
 dev = [
@@ -32,4 +31,5 @@ packages = ["src/ai_metronome", "tools"]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+norecursedirs = ["archive", ".venv", ".git"]
 asyncio_mode = "auto"
