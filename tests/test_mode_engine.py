@@ -1,4 +1,4 @@
-"""Unit tests for AI Metronome visual mode engine and gesture detector."""
+"""Unit tests for AI Metronome visual mode engine, PLL beat clock, and gesture detector."""
 
 from ai_metronome.mode_engine import (
     GestureDetector,
@@ -110,28 +110,49 @@ def test_meter_resets_beat_count_after_pause():
     assert after_pause[0].beat_num == 1
 
 
-def test_gesture_two_slowish_shakes():
-    """Verify 2 slowish shakes (~1.35g swings separated by 350ms) trigger DOUBLE_SHAKE."""
+def test_pll_internal_clock_fires_on_schedule_and_filters_jitter():
+    """Verify internal PLL clock fires autonomously on time and avoids double-flashing when late click arrives."""
+    engine = ModeEngine(initial_mode=MetronomeMode.ON_BEAT)
+
+    # Click 1 at t=1.000s, Click 2 at t=1.500s -> locks PLL at period=0.500s (120 BPM)
+    assert len(engine.on_click(now=1.000)) == 1
+    assert len(engine.on_click(now=1.500)) == 1
+    assert engine.is_locked is True
+    assert abs(engine.period - 0.500) < 1e-6
+
+    # Beat 3 is due at t=2.000s on the internal clock BEFORE the delayed click recognition at t=2.018s
+    auto_flashes = engine.get_due_flashes(now=2.001)
+    assert len(auto_flashes) == 1
+    assert auto_flashes[0].color == "RED"
+    assert abs(auto_flashes[0].target_time - 2.000) < 1e-6
+
+    # Now the delayed click recognition arrives 18ms late at t=2.018s:
+    # Should NOT double-flash, and should gently nudge phase & period rather than jumping +18ms
+    late_click_flashes = engine.on_click(now=2.018)
+    assert len(late_click_flashes) == 0
+    # Period should only shift by freq_gain * 0.018 (~4ms), staying very close to 0.504s
+    assert 0.500 < engine.period < 0.506
+
+
+def test_gesture_backed_off_sensitivity_ignores_minor_bumps_and_triggers_deliberate():
+    """Verify minor 1.25g nudges are ignored while 2 deliberate ~1.55g shakes or a 2.4g drop trigger."""
     gd = GestureDetector()
-    # Resting on table
     assert gd.update(0.0, 0.0, 1.0, now=1.0) == (False, "")
 
-    # First slow shake stroke (~1.35g)
-    assert gd.update(0.4, 0.0, 1.3, now=1.20) == (False, "")
-    # Return toward rest
+    # Minor bumps (~1.25g) should NOT trigger
+    assert gd.update(0.2, 0.0, 1.23, now=1.20) == (False, "")
     assert gd.update(0.0, 0.0, 1.0, now=1.35) == (False, "")
-    # Second slow shake stroke (~1.35g) 350ms after first
-    triggered, kind = gd.update(-0.4, 0.0, 1.3, now=1.55)
+    assert gd.update(-0.2, 0.0, 1.23, now=1.55) == (False, "")
+
+    # Two deliberate slow shakes (~1.55g) trigger DOUBLE_SHAKE
+    assert gd.update(0.5, 0.0, 1.48, now=2.00) == (False, "")
+    assert gd.update(0.0, 0.0, 1.0, now=2.18) == (False, "")
+    triggered, kind = gd.update(-0.5, 0.0, 1.48, now=2.40)
     assert triggered is True
     assert kind == "DOUBLE_SHAKE"
 
-
-def test_gesture_harder_drop_to_table():
-    """Verify a single firmer drop/tap to the table triggers HARD_DROP immediately."""
-    gd = GestureDetector()
-    assert gd.update(0.0, 0.0, 1.0, now=1.0) == (False, "")
-
-    # Table drop impact (~2.0g)
-    triggered, kind = gd.update(0.0, 0.0, 2.0, now=1.08)
-    assert triggered is True
-    assert kind == "HARD_DROP"
+    # Firm drop to table (~2.45g) after debounce triggers HARD_DROP
+    assert gd.update(0.0, 0.0, 1.0, now=3.50) == (False, "")
+    triggered_drop, kind_drop = gd.update(0.0, 0.0, 2.45, now=3.55)
+    assert triggered_drop is True
+    assert kind_drop == "HARD_DROP"

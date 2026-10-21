@@ -4,6 +4,26 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-20 — Autonomous Phase-Locked Loop (PLL) Beat Clock, Sensitivity Tuning & TFLite Micro Roadmap
+
+> [!NOTE] User Instructions & Guidance:
+> - *"ok, works ok, commit work. mode switch is a bit too sensitive now, back off a little. then work on improving accuracy of the flashing - the mechanical click is actually very accurate to my ears, but our software based interpretation of that click results in timing errors on the led flashing, maybe the led needs it's own internal accurate clock loop that is continuously adjusted by the click recognition. code, deploy and test these improvements. add future phase for optimized native code with voice input (tflite)"*
+
+### ADR 007: Autonomous PLL Beat Clock (`BeatPLL`), Sub-Frame Click Indexing & TFLite Voice Roadmap
+- **Context**: Reactive LED flashing driven directly by software frame detection suffered from variable buffer alignment jitter, boundary-straddling transient rejection, and serial I/O latency. Additionally, the accelerometer gesture thresholds (`0.26g` slow shake / `0.85g` drop) were slightly too sensitive during casual handling.
+- **Decision**:
+  1. **Autonomous Internal PLL Beat Clock (`ModeEngine` / `CircuitModeEngine`)**:
+     - Decoupled LED flashing from raw frame-by-frame click triggers by introducing an internal Phase-Locked Loop oscillator (`period`, `next_beat_time`, `last_beat_time`).
+     - Once 2 clicks establish tempo lock, the internal clock autonomously fires LED flashes on schedule (with a 3.0 ms anticipatory lead across 4.9 ms / 200 Hz audio frames) and coasts smoothly across up to 3 missed clicks before auto-unlocking.
+     - Recognized clicks compute a **sub-frame sample-accurate timestamp** ($62.5\,\mu\text{s}$ resolution via `peak_idx` at 16 kHz) and apply proportional phase correction ($\alpha_{\phi} = 0.35$) and integral frequency correction ($\alpha_f = 0.22$) without double-flashing.
+     - Fixed boundary-straddling click rejection by comparing `hp_peak` against `prev_quiet_peak` rather than the immediately preceding frame's peak.
+  2. **Backed-Off Gesture Thresholds**:
+     - Raised `slow_shake_dyn_g` from `0.26g` to `0.48g` (release `< 0.20g`, min stroke gap `0.15s`, debounce `1.0s`) and `hard_drop_dyn_g` from `0.85g` to `1.35g` (`hard_drop_jerk_g = 1.45g`).
+  3. **Future Phase — Native Firmware with TFLite Micro Voice Input**:
+     - Added Phase 4 to `PLANNING.md` and `ROADMAP.md` for native C++/Rust firmware incorporating TensorFlow Lite for Microcontrollers (TFLite Micro + CMSIS-NN) keyword spotting on the shared 16 kHz PDM DMA stream.
+
+---
+
 ## 2026-10-20 — 4-Mode Streamlining, Dual-Gesture Detector & HIL CLI Test Runner
 
 > [!NOTE] User Instructions & Guidance:

@@ -1,4 +1,4 @@
-"""AI Metronome POC v2 — Seeed Studio XIAO nRF52840 Sense (CircuitPython).
+"""AI Metronome POC v2.1 — Seeed Studio XIAO nRF52840 Sense (CircuitPython).
 
 Copy this file directly to `CIRCUITPY/code.py` (or deploy via `uv run xiao-cli deploy`).
 Works out of the box with zero external libraries required, or automatically
@@ -8,19 +8,21 @@ Features:
 1. HARDWARE INIT & DIAGNOSTICS:
    - Turns Blue LED ON during hardware health checks (Battery voltage gate, charge state,
      CPU die temperature, memory free space, PDM mic rail `board.MIC_PWR`, and IMU power rail `board.IMU_PWR`).
-   - Calibrates PDM microphone ambient noise floor.
+   - Calibrates PDM microphone ambient noise floor and measures DMA frame timing.
    - Initializes onboard LSM6DS3TR-C 6-axis accelerometer on internal I2C bus (`board.IMU_SCL` / `board.IMU_SDA`) at 416 Hz.
 2. INIT OK:
    - Pulses Green LED 3 times to confirm initialization passed.
-3. 4-MODE VISUAL FLASH SEQUENCER (Extended 130ms pulse width for maximum visibility):
-   - Mode 1: On-Beat (1x) — Flashes Red on every click.
-   - Mode 2: In-Between / Upbeat (&) — Flashes Blue halfway between clicks (t + IOI / 2).
+3. INTERNAL PHASE-LOCKED LOOP (PLL) BEAT CLOCK & 4-MODE SEQUENCER (130ms pulse width):
+   - Drives LED flashes from an autonomous internal high-precision clock (`CircuitModeEngine`)
+     that is continuously phase- and frequency-adjusted by sub-frame sample-indexed click recognition.
+   - Mode 1: On-Beat (1x) — Flashes Red on every beat.
+   - Mode 2: In-Between / Upbeat (&) — Flashes Blue halfway between beats (t_beat + period / 2).
    - Mode 3: 4/4 Meter — Green on Beat 1, silent (no LED) on Beats 2, 3, 4.
    - Mode 4: 3/4 Meter — Green on Beat 1, silent (no LED) on Beats 2, 3.
-4. GESTURE MODE SWITCHING (Onboard Accelerometer @ 125 Hz polling):
+4. GESTURE MODE SWITCHING (Backed-off sensitivity @ 125 Hz polling):
    - Triggered by EITHER:
-     a) 2 slowish shakes in hand (|a - 1g| >= 0.26g with hysteresis), OR
-     b) 1 firmer drop / tap onto the table (|a - 1g| >= 0.85g or 3D jerk >= 0.90g).
+     a) 2 deliberate slowish shakes in hand (|a - 1g| >= 0.48g with hysteresis release < 0.20g), OR
+     b) 1 firm drop / tap onto the table (|a - 1g| >= 1.35g or 3D jerk >= 1.45g).
    - Clear Confirmation: Long Bright White flash (all 3 LEDs on for 350ms), pause,
      then N slow pulses (1..4) in the new mode's color.
 """
@@ -45,13 +47,14 @@ try:
 except ImportError:
     HAS_ADAFRUIT_LSM6DS = False
 
-# --- Audio, IMU & Timing Tuning Constants ---
+# --- Audio, PLL & Timing Tuning Constants ---
 SAMPLE_RATE = 16000
-BUFFER_SIZE = 128          # 128 samples @ 16 kHz = 8.0 ms frame window (125 Hz frame rate)
+BUFFER_SIZE = 80           # 80 samples @ 16 kHz = 5.0 ms capture window (~6.8 ms total loop @ ~147 Hz)
 WARMUP_FRAMES = 8          # Discard initial PDM decimation filter power-on settling frames
-CALIBRATION_FRAMES = 20    # Ambient noise calibration window (~160 ms)
+CALIBRATION_FRAMES = 25    # Ambient noise calibration window
 LED_FLASH_SEC = 0.130      # 130 ms extended pulse duration for maximum perceived brightness
-PAUSE_RESET_SEC = 2.0      # Reset meter beat count to 1 if clicks pause longer than 2.0s
+PAUSE_RESET_SEC = 2.0      # Reset meter beat count & unlock PLL if clicks pause longer than 2.0s
+LEAD_COMP_SEC = 0.003      # 3.0 ms anticipatory lead to center flash timing across the 6.8 ms frame
 
 
 class MetronomeMode:
@@ -120,13 +123,11 @@ class StatusLEDs:
         3. N distinct 200ms pulses in the new mode's color (1=Red, 2=Blue, 3=Green, 4=Green).
         """
         self.all_off()
-        # 1. Bright White confirmation burst
         self.set_rgb(True, True, True)
         time.sleep(0.35)
         self.all_off()
         time.sleep(0.22)
 
-        # 2. Count out the new mode number in its signature color
         if mode_num == MetronomeMode.ON_BEAT:
             color = (True, False, False)   # Red
         elif mode_num == MetronomeMode.UPBEAT:
@@ -150,23 +151,23 @@ class StatusLEDs:
 
 
 class ShakeAndDropDetector:
-    """High-rate (125 Hz) gesture detector for onboard LSM6DS3TR-C.
+    """High-rate gesture detector for onboard LSM6DS3TR-C with backed-off sensitivity.
 
     Detects either:
-    - 1 harder drop / tap to the table (HARD_DROP)
-    - 2 slowish shakes in hand within 1.6s (DOUBLE_SHAKE)
+    - 1 firm drop / tap to the table (HARD_DROP: dyn >= 1.35g or jerk >= 1.45g)
+    - 2 deliberate slowish shakes in hand within 1.4s (DOUBLE_SHAKE: dyn >= 0.48g, release < 0.20g)
     """
 
     def __init__(
         self,
         i2c_bus,
-        hard_drop_dyn_g: float = 0.85,
-        hard_drop_jerk_g: float = 0.90,
-        slow_shake_dyn_g: float = 0.26,
-        slow_shake_release_g: float = 0.14,
-        min_stroke_gap_sec: float = 0.12,
-        shake_window_sec: float = 1.6,
-        debounce_sec: float = 0.8,
+        hard_drop_dyn_g: float = 1.35,
+        hard_drop_jerk_g: float = 1.45,
+        slow_shake_dyn_g: float = 0.48,
+        slow_shake_release_g: float = 0.20,
+        min_stroke_gap_sec: float = 0.15,
+        shake_window_sec: float = 1.4,
+        debounce_sec: float = 1.0,
     ) -> None:
         self.i2c = i2c_bus
         self.hard_drop_dyn_g = hard_drop_dyn_g
@@ -190,8 +191,6 @@ class ShakeAndDropDetector:
             self._init_sensor()
 
     def _init_sensor(self) -> None:
-        # Prefer direct high-speed I2C register access for minimal per-frame latency,
-        # or fall back to adafruit_lsm6ds if direct setup fails.
         try:
             while not self.i2c.try_lock():
                 pass
@@ -204,7 +203,6 @@ class ShakeAndDropDetector:
                         print(f"  [WARN - IMU] LSM6DS3 not found on I2C bus (found: {[hex(a) for a in found]})")
                         return
 
-                # WHO_AM_I check (register 0x0F)
                 who = bytearray(1)
                 self.i2c.writeto_then_readfrom(self.address, bytes([0x0F]), who)
                 print(f"  [IMU]  WHO_AM_I         : {hex(who[0])} at {hex(self.address)}")
@@ -240,7 +238,6 @@ class ShakeAndDropDetector:
             self.i2c.unlock()
 
         ax, ay, az = struct.unpack("<hhh", self._buf6)
-        # +/-4g scale: 8192 LSB/g
         return ax / 8192.0, ay / 8192.0, az / 8192.0
 
     def check_gesture(self, now: float) -> tuple[bool, str]:
@@ -271,14 +268,14 @@ class ShakeAndDropDetector:
             if (now - self.last_trigger_time) < self.debounce_sec:
                 return False, ""
 
-            # 1. Single harder drop / tap to table
+            # 1. Single firmer drop / tap to table
             if dyn >= self.hard_drop_dyn_g or jerk >= self.hard_drop_jerk_g:
                 self.last_trigger_time = now
                 self.in_stroke = False
                 self.shake_peaks.clear()
                 return True, "HARD_DROP"
 
-            # 2. Two slowish shakes with hysteresis release
+            # 2. Two deliberate slowish shakes with hysteresis release
             if dyn < self.slow_shake_release_g:
                 self.in_stroke = False
             elif dyn >= self.slow_shake_dyn_g and not self.in_stroke:
@@ -297,14 +294,15 @@ class ShakeAndDropDetector:
         return False, ""
 
 
-def extract_highpass_features(sample_buffer) -> tuple[float, int]:
-    """Single-pass first-difference high-pass filter H(z) = 1 - z^-1."""
+def extract_highpass_features_indexed(sample_buffer) -> tuple[float, int, int]:
+    """Single-pass first-difference high-pass filter H(z) = 1 - z^-1 returning (mean, peak, peak_idx)."""
     count = len(sample_buffer)
     if count < 2:
-        return 0.0, 0
+        return 0.0, 0, 0
 
     hp_sum = 0
     hp_peak = 0
+    peak_idx = 0
     prev = sample_buffer[0]
 
     for i in range(1, count):
@@ -315,23 +313,26 @@ def extract_highpass_features(sample_buffer) -> tuple[float, int]:
         hp_sum += diff
         if diff > hp_peak:
             hp_peak = diff
+            peak_idx = i
         prev = curr
 
-    return hp_sum / (count - 1), hp_peak
+    return hp_sum / (count - 1), hp_peak, peak_idx
 
 
 class PDMClickDetector:
-    """Adaptive high-pass transient click detector and tempo tracker."""
+    """Adaptive high-pass transient click detector with sub-frame onset timestamping."""
 
     def __init__(
         self,
-        peak_snr_mult: float = 6.0,
-        mean_snr_mult: float = 1.6,
-        min_peak_threshold: int = 800,
-        attack_slope_ratio: float = 1.8,
+        sample_rate: int = SAMPLE_RATE,
+        peak_snr_mult: float = 5.5,
+        mean_snr_mult: float = 1.5,
+        min_peak_threshold: int = 750,
+        attack_slope_ratio: float = 1.6,
         refractory_sec: float = 0.12,
         ema_alpha: float = 0.04,
     ) -> None:
+        self.sample_rate = sample_rate
         self.peak_snr_mult = peak_snr_mult
         self.mean_snr_mult = mean_snr_mult
         self.min_peak_threshold = min_peak_threshold
@@ -341,7 +342,7 @@ class PDMClickDetector:
 
         self.noise_floor_mean: float = 40.0
         self.noise_floor_peak: float = 120.0
-        self.prev_hp_peak: int = 0
+        self.prev_quiet_peak: float = 120.0
         self.last_click_time: float = -10.0
         self.click_count: int = 0
         self.recent_intervals: list[float] = []
@@ -353,7 +354,7 @@ class PDMClickDetector:
         self._cal_peaks: list[int] = []
 
     def calibrate_step(self, sample_buffer) -> tuple[float, int]:
-        hp_mean, hp_peak = extract_highpass_features(sample_buffer)
+        hp_mean, hp_peak, _ = extract_highpass_features_indexed(sample_buffer)
         self._cal_means.append(hp_mean)
         self._cal_peaks.append(hp_peak)
         return hp_mean, hp_peak
@@ -364,12 +365,18 @@ class PDMClickDetector:
             avg_peak = sum(self._cal_peaks) / len(self._cal_peaks)
             self.noise_floor_mean = max(15.0, avg_mean)
             self.noise_floor_peak = max(60.0, avg_peak)
-            self.prev_hp_peak = int(self.noise_floor_peak)
+            self.prev_quiet_peak = self.noise_floor_peak
         self.is_calibrated = True
         return self.noise_floor_mean, self.noise_floor_peak
 
-    def process_frame(self, sample_buffer, now: float) -> tuple[bool, float, int]:
-        hp_mean, hp_peak = extract_highpass_features(sample_buffer)
+    def process_frame(self, sample_buffer, frame_end_time: float) -> tuple[bool, float, int, float]:
+        """Analyze audio frame and return (is_click, hp_mean, hp_peak, sample_accurate_onset_time)."""
+        hp_mean, hp_peak, peak_idx = extract_highpass_features_indexed(sample_buffer)
+        buf_len = len(sample_buffer)
+
+        # Sub-frame sample-accurate onset timestamp inside the DMA buffer
+        samples_ago = max(0, buf_len - 1 - peak_idx)
+        onset_time = frame_end_time - (samples_ago / float(self.sample_rate))
 
         peak_thresh = max(
             float(self.min_peak_threshold),
@@ -377,17 +384,17 @@ class PDMClickDetector:
         )
         mean_thresh = max(25.0, self.noise_floor_mean * self.mean_snr_mult)
 
-        elapsed = now - self.last_click_time
+        elapsed = onset_time - self.last_click_time
         in_refractory = elapsed < self.refractory_sec
 
         crest_ratio = hp_peak / (hp_mean + 1.0)
-        is_sharp_attack = hp_peak >= (self.prev_hp_peak * self.attack_slope_ratio)
+        is_sharp_attack = hp_peak >= (self.prev_quiet_peak * self.attack_slope_ratio)
 
         is_click = (
             (not in_refractory)
             and (hp_peak >= peak_thresh)
             and (hp_mean >= mean_thresh)
-            and (crest_ratio >= 2.2)
+            and (crest_ratio >= 2.1)
             and is_sharp_attack
         )
 
@@ -399,40 +406,76 @@ class PDMClickDetector:
                     self.recent_intervals.pop(0)
                 self.avg_ioi = sum(self.recent_intervals) / len(self.recent_intervals)
                 self.bpm = 60.0 / self.avg_ioi
-            self.last_click_time = now
-        elif not in_refractory and hp_peak < peak_thresh * 0.7:
+            self.last_click_time = onset_time
+        elif not in_refractory and hp_peak < peak_thresh * 0.65:
             alpha = self.ema_alpha
             self.noise_floor_mean = (1.0 - alpha) * self.noise_floor_mean + alpha * hp_mean
             self.noise_floor_peak = (1.0 - alpha) * self.noise_floor_peak + alpha * hp_peak
             self.noise_floor_mean = max(15.0, self.noise_floor_mean)
             self.noise_floor_peak = max(60.0, self.noise_floor_peak)
+            self.prev_quiet_peak = self.noise_floor_peak
 
-        self.prev_hp_peak = hp_peak
-        return is_click, hp_mean, hp_peak
+        return is_click, hp_mean, hp_peak, onset_time
 
 
 class CircuitModeEngine:
-    """Manages visual flash modes (1-4), beat counting, and upbeat scheduling."""
+    """Autonomous Phase-Locked Loop (PLL) beat clock and 4-mode visual sequencer.
 
-    def __init__(self, pause_reset_sec: float = PAUSE_RESET_SEC) -> None:
+    Drives LED flashes from an internal steady clock (`next_beat_time`, `period`)
+    that is continuously phase- and frequency-adjusted by recognized clicks.
+    """
+
+    def __init__(
+        self,
+        pause_reset_sec: float = PAUSE_RESET_SEC,
+        phase_gain: float = 0.35,
+        freq_gain: float = 0.22,
+        max_coast_beats: int = 3,
+    ) -> None:
         self.current_mode = MetronomeMode.ON_BEAT
         self.pause_reset_sec = pause_reset_sec
+        self.phase_gain = phase_gain
+        self.freq_gain = freq_gain
+        self.max_coast_beats = max_coast_beats
+
         self.last_click_time = None
         self.beat_count = 0
+        self.period = 0.5
+        self.is_locked = False
+        self.last_beat_time = None
+        self.next_beat_time = None
+        self.coasted_beats = 0
         self.scheduled_flashes = []  # list of (target_time, color)
+
+    @property
+    def bpm(self) -> float | None:
+        if not self.is_locked or self.period <= 0:
+            return None
+        return 60.0 / self.period
+
+    def reset_clock(self) -> None:
+        self.beat_count = 0
+        self.is_locked = False
+        self.last_beat_time = None
+        self.next_beat_time = None
+        self.coasted_beats = 0
+        self.scheduled_flashes.clear()
 
     def cycle_mode(self) -> int:
         self.current_mode = (self.current_mode % 4) + 1
-        self.beat_count = 0
-        self.scheduled_flashes.clear()
+        self.reset_clock()
         return self.current_mode
 
-    def on_click(self, now: float, ioi: float) -> list[str]:
-        """Process click and return list of immediate LED colors to flash ('RED', 'GREEN', or empty)."""
-        if self.last_click_time is not None and (now - self.last_click_time) > self.pause_reset_sec:
-            self.beat_count = 0
-        self.last_click_time = now
+    def next_scheduled_event_time(self) -> float | None:
+        """Return the earliest upcoming internal beat or upbeat timestamp."""
+        candidates = []
+        if self.is_locked and self.next_beat_time is not None:
+            candidates.append(self.next_beat_time)
+        for target_t, _ in self.scheduled_flashes:
+            candidates.append(target_t)
+        return min(candidates) if candidates else None
 
+    def _emit_beat(self, beat_time: float) -> list[str]:
         if self.current_mode == MetronomeMode.METER_4_4:
             self.beat_count = (self.beat_count % 4) + 1
         elif self.current_mode == MetronomeMode.METER_3_4:
@@ -440,24 +483,100 @@ class CircuitModeEngine:
         else:
             self.beat_count = (self.beat_count % 4) + 1
 
+        self.last_beat_time = beat_time
         immediate = []
 
         if self.current_mode == MetronomeMode.ON_BEAT:
             immediate.append("RED")
-
         elif self.current_mode == MetronomeMode.UPBEAT:
-            if ioi > 0:
-                self.scheduled_flashes.append((now + (ioi / 2.0), "BLUE"))
-
+            if self.period > 0:
+                self.scheduled_flashes.append((beat_time + (self.period / 2.0), "BLUE"))
         elif self.current_mode in (MetronomeMode.METER_4_4, MetronomeMode.METER_3_4):
             if self.beat_count == 1:
                 immediate.append("GREEN")
 
         return immediate
 
+    def _update_period_from_interval(self, measured_dt: float) -> None:
+        if not (0.20 <= measured_dt <= 3.0):
+            return
+        for mult in (1, 2):
+            implied_period = measured_dt / mult
+            if abs(implied_period - self.period) < (0.28 * self.period):
+                self.period = (1.0 - self.freq_gain) * self.period + (self.freq_gain * implied_period)
+                return
+
+    def on_click(self, onset_time: float, ioi: float = 0.5) -> tuple[list[str], float]:
+        """Process recognized click at `onset_time` to lock/adjust the PLL clock.
+
+        Returns (immediate_colors, phase_error_ms).
+        """
+        if self.last_click_time is not None and (onset_time - self.last_click_time) > self.pause_reset_sec:
+            self.reset_clock()
+
+        measured_dt = (onset_time - self.last_click_time) if self.last_click_time is not None else None
+        self.last_click_time = onset_time
+        self.coasted_beats = 0
+
+        if measured_dt is None:
+            if ioi > 0:
+                self.period = ioi
+            return self._emit_beat(onset_time), 0.0
+
+        if not self.is_locked:
+            if 0.20 <= measured_dt <= 2.0:
+                self.period = measured_dt
+                self.is_locked = True
+                flashes = self._emit_beat(onset_time)
+                self.next_beat_time = onset_time + self.period
+                return flashes, 0.0
+            if ioi > 0:
+                self.period = ioi
+            return self._emit_beat(onset_time), 0.0
+
+        # Locked PLL state: check if internal clock already fired this beat
+        if self.last_beat_time is not None and abs(onset_time - self.last_beat_time) < (0.40 * self.period):
+            phase_err = onset_time - self.last_beat_time
+            self._update_period_from_interval(measured_dt)
+            corrected_beat = self.last_beat_time + (self.phase_gain * phase_err)
+            self.last_beat_time = corrected_beat
+            self.next_beat_time = corrected_beat + self.period
+            if self.current_mode == MetronomeMode.UPBEAT and self.scheduled_flashes:
+                self.scheduled_flashes[-1] = (corrected_beat + (self.period / 2.0), "BLUE")
+            return [], (phase_err * 1000.0)
+
+        # Check if click arrived slightly ahead of upcoming next_beat_time
+        if self.next_beat_time is not None and abs(onset_time - self.next_beat_time) < (0.40 * self.period):
+            phase_err = onset_time - self.next_beat_time
+            self._update_period_from_interval(measured_dt)
+            corrected_beat = self.next_beat_time + (self.phase_gain * phase_err)
+            flashes = self._emit_beat(corrected_beat)
+            self.next_beat_time = corrected_beat + self.period
+            return flashes, (phase_err * 1000.0)
+
+        # Tempo changed significantly: re-lock
+        if 0.20 <= measured_dt <= 2.0:
+            self.period = measured_dt
+        flashes = self._emit_beat(onset_time)
+        self.next_beat_time = onset_time + self.period
+        return flashes, 0.0
+
     def get_due_flashes(self, now: float) -> list[str]:
-        """Pop and return any scheduled upbeat colors due at or before `now`."""
+        """Advance autonomous internal beat clock and return any colors due at or before `now`."""
         due = []
+
+        if self.is_locked and self.next_beat_time is not None and now >= self.next_beat_time:
+            if (
+                self.last_click_time is not None
+                and (now - self.last_click_time) > self.pause_reset_sec
+            ) or self.coasted_beats >= self.max_coast_beats:
+                self.reset_clock()
+            else:
+                beat_t = self.next_beat_time
+                self.coasted_beats += 1
+                self.next_beat_time = beat_t + self.period
+                due.extend(self._emit_beat(beat_t))
+
         remaining = []
         for target_time, color in self.scheduled_flashes:
             if target_time <= now:
@@ -494,7 +613,7 @@ def get_battery_voltage() -> float:
 def init_hardware(leds: StatusLEDs):
     """Run startup diagnostics, power up PDM mic and IMU, return (mic, i2c)."""
     print("\n" + "=" * 58)
-    print("   AI METRONOME POC v2 -- XIAO nRF52840 SENSE INIT")
+    print("   AI METRONOME POC v2.1 -- XIAO nRF52840 SENSE INIT")
     print("=" * 58)
 
     leds.set_rgb(False, False, True)  # Solid Blue LED during init
@@ -542,7 +661,7 @@ def init_hardware(leds: StatusLEDs):
         imu_pwr = digitalio.DigitalInOut(board.IMU_PWR)
         imu_pwr.direction = digitalio.Direction.OUTPUT
         imu_pwr.value = True
-        time.sleep(0.08)  # Allow IMU power rail to stabilize
+        time.sleep(0.08)
         print("  [IMU]  Power Gate       : Active (board.IMU_PWR = HIGH)")
     except Exception as err:
         print(f"  [WARN - IMU] Could not assert board.IMU_PWR: {err}")
@@ -560,10 +679,12 @@ def init_hardware(leds: StatusLEDs):
         print(f"  [FAIL] PDMIn initialization failed: {err}")
         return None, None
 
-    # Verify Microphone DMA Capture
+    # Verify Microphone DMA Capture & Measure Frame Duration
     test_buf = array.array("H", [0] * BUFFER_SIZE)
+    t0 = time.monotonic()
     for _ in range(WARMUP_FRAMES):
         mic.record(test_buf, len(test_buf))
+    avg_frame_ms = ((time.monotonic() - t0) / WARMUP_FRAMES) * 1000.0
 
     min_sample = min(test_buf)
     max_sample = max(test_buf)
@@ -571,7 +692,7 @@ def init_hardware(leds: StatusLEDs):
     if max_sample == 0 or min_sample == 65535:
         print(f"  [FAIL] PDM Microphone rail stuck (min={min_sample}, max={max_sample})")
         return None, None
-    print(f"  [MIC]  Signal Health    : OK (DC range {min_sample}..{max_sample}, span={span})")
+    print(f"  [MIC]  Signal Health    : OK (DC range {min_sample}..{max_sample}, span={span}, frame={avg_frame_ms:.1f}ms)")
 
     # 5. Initialize Dedicated IMU I2C Bus at 400 kHz
     i2c_bus = None
@@ -584,6 +705,20 @@ def init_hardware(leds: StatusLEDs):
     return mic, i2c_bus
 
 
+def _trigger_led_colors(leds: StatusLEDs, colors: list[str], now: float) -> tuple[bool, float]:
+    """Turn on the highest-priority LED color in `colors` immediately and return (active, off_at)."""
+    if "RED" in colors:
+        leds.set_rgb(True, False, False)
+        return True, now + LED_FLASH_SEC
+    if "GREEN" in colors:
+        leds.set_rgb(False, True, False)
+        return True, now + LED_FLASH_SEC
+    if "BLUE" in colors:
+        leds.set_rgb(False, False, True)
+        return True, now + LED_FLASH_SEC
+    return False, 0.0
+
+
 def main() -> None:
     leds = StatusLEDs()
     mic, i2c_bus = init_hardware(leds)
@@ -593,14 +728,12 @@ def main() -> None:
         leds.signal_fault_loop()
         return
 
-    # Accelerometer gesture detector (2 slow shakes OR 1 table drop) and mode engine
     gesture_detector = ShakeAndDropDetector(i2c_bus)
     mode_engine = CircuitModeEngine()
 
     audio_buffer = array.array("H", [0] * BUFFER_SIZE)
     detector = PDMClickDetector()
 
-    # Calibrate ambient noise floor while blinking Blue LED
     print("  [CAL]  Calibrating ambient room noise floor...")
     for i in range(CALIBRATION_FRAMES):
         leds.set_rgb(False, False, (i % 2 == 0))
@@ -610,9 +743,9 @@ def main() -> None:
     nf_mean, nf_peak = detector.finalize_calibration()
     print(f"  [CAL]  Baseline Floor   : mean={nf_mean:.1f}, peak={nf_peak:.1f}")
     print("=" * 58)
-    print("[READY] Initialization OK! Metronome active.")
+    print("[READY] Initialization OK! Autonomous PLL Beat Clock active.")
     print(f"[MODE]  Current: {MODE_NAMES[mode_engine.current_mode]}")
-    print("[TIP]   2 slow shakes OR 1 firm drop to table cycles modes (1 -> 2 -> 3 -> 4 -> 1)\n")
+    print("[TIP]   2 deliberate shakes OR 1 firm drop to table cycles modes (1..4)\n")
 
     leds.signal_init_ok()
 
@@ -620,11 +753,45 @@ def main() -> None:
     led_is_active = False
 
     while True:
-        # 1. Capture 8 ms audio frame via PDM DMA
-        mic.record(audio_buffer, len(audio_buffer))
+        # 1. Pre-DMA Internal PLL Clock Check (with 3.0 ms anticipatory lead):
         now = time.monotonic()
+        due_pre = mode_engine.get_due_flashes(now + LEAD_COMP_SEC)
+        if due_pre:
+            led_is_active, led_off_at = _trigger_led_colors(leds, due_pre, now)
 
-        # 2. Poll accelerometer every frame (125 Hz) so fast table drops & slow shakes never miss
+        # 2. Capture 5.0 ms audio frame via PDM DMA (zero spin-wait stall)
+        mic.record(audio_buffer, len(audio_buffer))
+        frame_end = time.monotonic()
+
+        # 3. Post-DMA Immediate Internal Clock Check (before any DSP/I2C/Serial work!)
+        due_post = mode_engine.get_due_flashes(frame_end + LEAD_COMP_SEC)
+        if due_post:
+            led_is_active, led_off_at = _trigger_led_colors(leds, due_post, frame_end)
+
+        # 4. Process audio frame for click & adjust PLL phase/frequency
+        is_click, hp_mean, hp_peak, onset_time = detector.process_frame(audio_buffer, frame_end)
+        if is_click:
+            immediate, phase_err_ms = mode_engine.on_click(onset_time, detector.avg_ioi)
+            # Fire LED BEFORE printing to serial so USB I/O never delays the flash!
+            if immediate:
+                led_is_active, led_off_at = _trigger_led_colors(leds, immediate, time.monotonic())
+
+            pll_bpm = mode_engine.bpm or detector.bpm
+            bpm_str = f"{pll_bpm:5.1f} BPM" if pll_bpm is not None else "  --- BPM"
+            lock_str = f"PLL:{phase_err_ms:+5.1f}ms" if mode_engine.is_locked else "PLL:UNLOCK"
+            beat_info = f"B{mode_engine.beat_count}"
+            print(
+                f"[CLICK #{detector.click_count:03d}] "
+                f"Pk:{hp_peak:5d} | {bpm_str} | {lock_str} | {beat_info}"
+            )
+
+        # 5. Handle LED off timing
+        now = time.monotonic()
+        if led_is_active and now >= led_off_at:
+            leds.all_off()
+            led_is_active = False
+
+        # 6. Poll accelerometer for deliberate mode switch gesture
         triggered, gesture_kind = gesture_detector.check_gesture(now)
         if triggered:
             new_mode = mode_engine.cycle_mode()
@@ -633,44 +800,8 @@ def main() -> None:
             print(f"{'*'*58}\n")
             leds.signal_mode_change(new_mode)
             led_is_active = False
-            # Reset audio click refractory timer so table drop sound doesn't trigger a beat flash
             detector.last_click_time = time.monotonic()
             gesture_detector.last_trigger_time = time.monotonic()
-            continue
-
-        # 3. Process audio frame for click
-        is_click, hp_mean, hp_peak = detector.process_frame(audio_buffer, now)
-
-        if is_click:
-            bpm_str = f"{detector.bpm:5.1f} BPM" if detector.bpm is not None else "  --- BPM"
-            beat_info = f"Beat {mode_engine.beat_count}" if mode_engine.current_mode in (MetronomeMode.METER_4_4, MetronomeMode.METER_3_4) else ""
-            print(
-                f"[CLICK #{detector.click_count:03d}] "
-                f"Peak:{hp_peak:6d} | Mean:{hp_mean:6.1f} | {bpm_str} | {beat_info}"
-            )
-
-            # Trigger immediate flash per active mode
-            immediate = mode_engine.on_click(now, detector.avg_ioi)
-            if "RED" in immediate:
-                leds.set_rgb(True, False, False)
-                led_is_active = True
-                led_off_at = now + LED_FLASH_SEC
-            elif "GREEN" in immediate:
-                leds.set_rgb(False, True, False)
-                led_is_active = True
-                led_off_at = now + LED_FLASH_SEC
-
-        # 4. Check for scheduled upbeat flashes (Mode 2)
-        due_flashes = mode_engine.get_due_flashes(now)
-        if "BLUE" in due_flashes:
-            leds.set_rgb(False, False, True)
-            led_is_active = True
-            led_off_at = now + LED_FLASH_SEC
-
-        # 5. Handle LED off timing
-        if led_is_active and now >= led_off_at:
-            leds.all_off()
-            led_is_active = False
 
 
 if __name__ == "__main__":
