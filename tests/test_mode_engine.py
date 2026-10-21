@@ -1,19 +1,18 @@
-"""Unit tests for AI Metronome visual mode engine."""
+"""Unit tests for AI Metronome visual mode engine and gesture detector."""
 
 from ai_metronome.mode_engine import (
-    MODE_NAMES,
+    GestureDetector,
     MetronomeMode,
     ModeEngine,
 )
 
 
 def test_mode_cycling():
-    """Verify cycling through all 5 modes wraps around cleanly."""
+    """Verify cycling through all 4 modes wraps around cleanly."""
     engine = ModeEngine()
     assert engine.current_mode == MetronomeMode.ON_BEAT
 
     assert engine.cycle_mode() == MetronomeMode.UPBEAT
-    assert engine.cycle_mode() == MetronomeMode.DOUBLE_TIME
     assert engine.cycle_mode() == MetronomeMode.METER_4_4
     assert engine.cycle_mode() == MetronomeMode.METER_3_4
     assert engine.cycle_mode() == MetronomeMode.ON_BEAT
@@ -44,21 +43,8 @@ def test_mode_2_upbeat_flashes_halfway_between_clicks():
     assert pending_due[0].target_time == 10.25
 
 
-def test_mode_3_double_time_flashes_on_beat_and_upbeat():
-    """Mode 3: Flashes Red on the beat AND schedules Blue on the upbeat."""
-    engine = ModeEngine(initial_mode=MetronomeMode.DOUBLE_TIME)
-    on_click_flashes = engine.on_click(now=10.0, ioi=0.6)
-    assert len(on_click_flashes) == 1
-    assert on_click_flashes[0].color == "RED"
-
-    due_upbeat = engine.get_due_flashes(now=10.31)
-    assert len(due_upbeat) == 1
-    assert due_upbeat[0].color == "BLUE"
-    assert due_upbeat[0].target_time == 10.30
-
-
-def test_mode_4_meter_4_4_green_on_1_silent_on_others():
-    """Mode 4: 4/4 meter — Green on beat 1, NO LED on beats 2, 3, 4."""
+def test_mode_3_meter_4_4_green_on_1_silent_on_others():
+    """Mode 3: 4/4 meter — Green on beat 1, NO LED on beats 2, 3, 4."""
     engine = ModeEngine(initial_mode=MetronomeMode.METER_4_4)
 
     # Beat 1: Green
@@ -86,8 +72,8 @@ def test_mode_4_meter_4_4_green_on_1_silent_on_others():
     assert b1_next[0].beat_num == 1
 
 
-def test_mode_5_meter_3_4_green_on_1_silent_on_others():
-    """Mode 5: 3/4 meter — Green on beat 1, NO LED on beats 2, 3."""
+def test_mode_4_meter_3_4_green_on_1_silent_on_others():
+    """Mode 4: 3/4 meter — Green on beat 1, NO LED on beats 2, 3."""
     engine = ModeEngine(initial_mode=MetronomeMode.METER_3_4)
 
     # Beat 1: Green
@@ -122,3 +108,30 @@ def test_meter_resets_beat_count_after_pause():
     assert len(after_pause) == 1
     assert after_pause[0].color == "GREEN"
     assert after_pause[0].beat_num == 1
+
+
+def test_gesture_two_slowish_shakes():
+    """Verify 2 slowish shakes (~1.35g swings separated by 350ms) trigger DOUBLE_SHAKE."""
+    gd = GestureDetector()
+    # Resting on table
+    assert gd.update(0.0, 0.0, 1.0, now=1.0) == (False, "")
+
+    # First slow shake stroke (~1.35g)
+    assert gd.update(0.4, 0.0, 1.3, now=1.20) == (False, "")
+    # Return toward rest
+    assert gd.update(0.0, 0.0, 1.0, now=1.35) == (False, "")
+    # Second slow shake stroke (~1.35g) 350ms after first
+    triggered, kind = gd.update(-0.4, 0.0, 1.3, now=1.55)
+    assert triggered is True
+    assert kind == "DOUBLE_SHAKE"
+
+
+def test_gesture_harder_drop_to_table():
+    """Verify a single firmer drop/tap to the table triggers HARD_DROP immediately."""
+    gd = GestureDetector()
+    assert gd.update(0.0, 0.0, 1.0, now=1.0) == (False, "")
+
+    # Table drop impact (~2.0g)
+    triggered, kind = gd.update(0.0, 0.0, 2.0, now=1.08)
+    assert triggered is True
+    assert kind == "HARD_DROP"

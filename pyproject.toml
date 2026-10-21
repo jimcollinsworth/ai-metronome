@@ -9,10 +9,12 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "bleak>=3.0.2",
+    "pyserial>=3.5",
 ]
 
 [project.scripts]
 ai-metronome = "ai_metronome:main"
+xiao-cli = "tools.xiao_cli:main"
 
 [dependency-groups]
 dev = [

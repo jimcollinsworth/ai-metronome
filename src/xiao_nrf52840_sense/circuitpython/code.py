@@ -1,6 +1,6 @@
 """AI Metronome POC v2 — Seeed Studio XIAO nRF52840 Sense (CircuitPython).
 
-Copy this file directly to `CIRCUITPY/code.py`.
+Copy this file directly to `CIRCUITPY/code.py` (or deploy via `uv run xiao-cli deploy`).
 Works out of the box with zero external libraries required, or automatically
 uses `adafruit_lsm6ds` if present in `/lib`.
 
@@ -9,18 +9,20 @@ Features:
    - Turns Blue LED ON during hardware health checks (Battery voltage gate, charge state,
      CPU die temperature, memory free space, PDM mic rail `board.MIC_PWR`, and IMU power rail `board.IMU_PWR`).
    - Calibrates PDM microphone ambient noise floor.
-   - Initializes onboard LSM6DS3TR-C 6-axis accelerometer on internal I2C bus (`board.IMU_SCL` / `board.IMU_SDA`).
+   - Initializes onboard LSM6DS3TR-C 6-axis accelerometer on internal I2C bus (`board.IMU_SCL` / `board.IMU_SDA`) at 416 Hz.
 2. INIT OK:
    - Pulses Green LED 3 times to confirm initialization passed.
-3. 5-MODE VISUAL FLASH SEQUENCER (Enhanced Brightness: 75ms pulse width):
+3. 4-MODE VISUAL FLASH SEQUENCER (Extended 130ms pulse width for maximum visibility):
    - Mode 1: On-Beat (1x) — Flashes Red on every click.
    - Mode 2: In-Between / Upbeat (&) — Flashes Blue halfway between clicks (t + IOI / 2).
-   - Mode 3: Double-Time (2x) — 2 flashes per click (Red on beat, Blue on upbeat).
-   - Mode 4: 4/4 Meter — Green on Beat 1, silent (no LED) on Beats 2, 3, 4.
-   - Mode 5: 3/4 Meter — Green on Beat 1, silent (no LED) on Beats 2, 3.
-4. GESTURE MODE SWITCHING (Onboard Accelerometer):
-   - Quick shake of the device (|a| > 2.3g) cycles through modes 1 -> 2 -> 3 -> 4 -> 5 -> 1.
-   - Pulses Cyan LED N times matching the new mode number for immediate visual confirmation.
+   - Mode 3: 4/4 Meter — Green on Beat 1, silent (no LED) on Beats 2, 3, 4.
+   - Mode 4: 3/4 Meter — Green on Beat 1, silent (no LED) on Beats 2, 3.
+4. GESTURE MODE SWITCHING (Onboard Accelerometer @ 125 Hz polling):
+   - Triggered by EITHER:
+     a) 2 slowish shakes in hand (|a - 1g| >= 0.26g with hysteresis), OR
+     b) 1 firmer drop / tap onto the table (|a - 1g| >= 0.85g or 3D jerk >= 0.90g).
+   - Clear Confirmation: Long Bright White flash (all 3 LEDs on for 350ms), pause,
+     then N slow pulses (1..4) in the new mode's color.
 """
 
 import array
@@ -48,9 +50,7 @@ SAMPLE_RATE = 16000
 BUFFER_SIZE = 128          # 128 samples @ 16 kHz = 8.0 ms frame window (125 Hz frame rate)
 WARMUP_FRAMES = 8          # Discard initial PDM decimation filter power-on settling frames
 CALIBRATION_FRAMES = 20    # Ambient noise calibration window (~160 ms)
-LED_FLASH_SEC = 0.075      # 75 ms high-visibility pulse duration (increased brightness)
-SHAKE_THRESHOLD_G = 2.3    # Shake acceleration threshold in g's (|a| > 2.3g)
-SHAKE_DEBOUNCE_SEC = 0.6   # Minimum interval between shake mode switches
+LED_FLASH_SEC = 0.130      # 130 ms extended pulse duration for maximum perceived brightness
 PAUSE_RESET_SEC = 2.0      # Reset meter beat count to 1 if clicks pause longer than 2.0s
 
 
@@ -58,17 +58,15 @@ class MetronomeMode:
     """Metronome visual flash modes."""
     ON_BEAT = 1
     UPBEAT = 2
-    DOUBLE_TIME = 3
-    METER_4_4 = 4
-    METER_3_4 = 5
+    METER_4_4 = 3
+    METER_3_4 = 4
 
 
 MODE_NAMES = {
     MetronomeMode.ON_BEAT: "Mode 1: On Beat (1x Red)",
     MetronomeMode.UPBEAT: "Mode 2: In-Between / Upbeat (& Blue)",
-    MetronomeMode.DOUBLE_TIME: "Mode 3: Double Time (2x Red + Blue)",
-    MetronomeMode.METER_4_4: "Mode 4: 4/4 Meter (Green on 1, silent 2-4)",
-    MetronomeMode.METER_3_4: "Mode 5: 3/4 Meter (Green on 1, silent 2-3)",
+    MetronomeMode.METER_4_4: "Mode 3: 4/4 Meter (Green on 1, silent 2-4)",
+    MetronomeMode.METER_3_4: "Mode 4: 3/4 Meter (Green on 1, silent 2-3)",
 }
 
 
@@ -111,19 +109,36 @@ class StatusLEDs:
         self.all_off()
         for _ in range(3):
             self.set_rgb(False, True, False)
-            time.sleep(0.12)
+            time.sleep(0.15)
             self.all_off()
-            time.sleep(0.08)
+            time.sleep(0.09)
 
     def signal_mode_change(self, mode_num: int) -> None:
-        """Blink Cyan LED mode_num times to confirm new mode selection."""
+        """Unmistakable visual confirmation:
+        1. Solid Bright White flash (all 3 RGB diodes ON for 350ms) to confirm gesture.
+        2. 220ms dark pause.
+        3. N distinct 200ms pulses in the new mode's color (1=Red, 2=Blue, 3=Green, 4=Green).
+        """
         self.all_off()
-        time.sleep(0.05)
+        # 1. Bright White confirmation burst
+        self.set_rgb(True, True, True)
+        time.sleep(0.35)
+        self.all_off()
+        time.sleep(0.22)
+
+        # 2. Count out the new mode number in its signature color
+        if mode_num == MetronomeMode.ON_BEAT:
+            color = (True, False, False)   # Red
+        elif mode_num == MetronomeMode.UPBEAT:
+            color = (False, False, True)   # Blue
+        else:
+            color = (False, True, False)   # Green (Modes 3 & 4)
+
         for _ in range(mode_num):
-            self.set_rgb(False, True, True)  # Cyan
-            time.sleep(0.09)
+            self.set_rgb(*color)
+            time.sleep(0.20)
             self.all_off()
-            time.sleep(0.07)
+            time.sleep(0.16)
 
     def signal_fault_loop(self) -> None:
         """Alternate Red and Blue LEDs indefinitely if critical hardware fails."""
@@ -134,19 +149,39 @@ class StatusLEDs:
             time.sleep(0.25)
 
 
-class ShakeDetector:
-    """Accelerometer shake detector for onboard LSM6DS3TR-C.
+class ShakeAndDropDetector:
+    """High-rate (125 Hz) gesture detector for onboard LSM6DS3TR-C.
 
-    Uses adafruit_lsm6ds if installed, or built-in direct I2C registers
-    (CTRL1_XL=0x10, OUTX_L_XL=0x28) with zero external dependencies.
+    Detects either:
+    - 1 harder drop / tap to the table (HARD_DROP)
+    - 2 slowish shakes in hand within 1.6s (DOUBLE_SHAKE)
     """
 
-    def __init__(self, i2c_bus, threshold_g: float = SHAKE_THRESHOLD_G, debounce_sec: float = SHAKE_DEBOUNCE_SEC):
+    def __init__(
+        self,
+        i2c_bus,
+        hard_drop_dyn_g: float = 0.85,
+        hard_drop_jerk_g: float = 0.90,
+        slow_shake_dyn_g: float = 0.26,
+        slow_shake_release_g: float = 0.14,
+        min_stroke_gap_sec: float = 0.12,
+        shake_window_sec: float = 1.6,
+        debounce_sec: float = 0.8,
+    ) -> None:
         self.i2c = i2c_bus
-        self.threshold_g = threshold_g
+        self.hard_drop_dyn_g = hard_drop_dyn_g
+        self.hard_drop_jerk_g = hard_drop_jerk_g
+        self.slow_shake_dyn_g = slow_shake_dyn_g
+        self.slow_shake_release_g = slow_shake_release_g
+        self.min_stroke_gap_sec = min_stroke_gap_sec
+        self.shake_window_sec = shake_window_sec
         self.debounce_sec = debounce_sec
+
         self.address = 0x6A
-        self.last_shake_time = -10.0
+        self.prev_accel = None
+        self.in_stroke = False
+        self.last_trigger_time = -10.0
+        self.shake_peaks = []
         self._buf6 = bytearray(6)
         self.sensor_obj = None
         self.is_ready = False
@@ -155,17 +190,8 @@ class ShakeDetector:
             self._init_sensor()
 
     def _init_sensor(self) -> None:
-        # 1. Try official Adafruit driver if present
-        if HAS_ADAFRUIT_LSM6DS:
-            try:
-                self.sensor_obj = LSM6DS3TRC(self.i2c)
-                self.is_ready = True
-                print("  [IMU]  Accelerometer    : Active via adafruit_lsm6ds library")
-                return
-            except Exception as err:
-                print(f"  [INFO - IMU] adafruit_lsm6ds init skipped: {err}, using direct I2C")
-
-        # 2. Direct I2C driver (no /lib dependencies required)
+        # Prefer direct high-speed I2C register access for minimal per-frame latency,
+        # or fall back to adafruit_lsm6ds if direct setup fails.
         try:
             while not self.i2c.try_lock():
                 pass
@@ -183,46 +209,92 @@ class ShakeDetector:
                 self.i2c.writeto_then_readfrom(self.address, bytes([0x0F]), who)
                 print(f"  [IMU]  WHO_AM_I         : {hex(who[0])} at {hex(self.address)}")
 
-                # CTRL1_XL (0x10): 104 Hz ODR, +/- 4g scale (0x48)
-                self.i2c.writeto(self.address, bytes([0x10, 0x48]))
+                # CTRL1_XL (0x10): 416 Hz ODR, +/- 4g full scale (0x68)
+                self.i2c.writeto(self.address, bytes([0x10, 0x68]))
                 self.is_ready = True
-                print("  [IMU]  Accelerometer    : Active via direct I2C (104 Hz, +/-4g)")
+                print("  [IMU]  Accelerometer    : Active via direct I2C (416 Hz, +/-4g)")
+                return
             finally:
                 self.i2c.unlock()
         except Exception as err:
-            print(f"  [WARN - IMU] LSM6DS3 direct init warning: {err}")
+            print(f"  [WARN - IMU] Direct I2C init warning: {err}")
 
-    def check_shake(self, now: float) -> bool:
-        """Check if acceleration magnitude exceeds shake threshold."""
-        if not self.is_ready or (now - self.last_shake_time) < self.debounce_sec:
-            return False
+        if HAS_ADAFRUIT_LSM6DS:
+            try:
+                self.sensor_obj = LSM6DS3TRC(self.i2c)
+                self.is_ready = True
+                print("  [IMU]  Accelerometer    : Active via adafruit_lsm6ds library")
+            except Exception as err:
+                print(f"  [WARN - IMU] adafruit_lsm6ds init failed: {err}")
+
+    def _read_accel_g(self):
+        if self.sensor_obj is not None:
+            ax, ay, az = self.sensor_obj.acceleration
+            return ax / 9.80665, ay / 9.80665, az / 9.80665
+
+        if not self.i2c.try_lock():
+            return None
+        try:
+            self.i2c.writeto_then_readfrom(self.address, bytes([0x28]), self._buf6)
+        finally:
+            self.i2c.unlock()
+
+        ax, ay, az = struct.unpack("<hhh", self._buf6)
+        # +/-4g scale: 8192 LSB/g
+        return ax / 8192.0, ay / 8192.0, az / 8192.0
+
+    def check_gesture(self, now: float) -> tuple[bool, str]:
+        """Poll accelerometer and return (triggered, gesture_name)."""
+        if not self.is_ready:
+            return False, ""
 
         try:
-            if self.sensor_obj is not None:
-                ax, ay, az = self.sensor_obj.acceleration
-                # Convert m/s^2 to g (1g ~ 9.806 m/s^2)
-                accel_mag = ((ax * ax + ay * ay + az * az) ** 0.5) / 9.80665
-                if accel_mag > self.threshold_g:
-                    self.last_shake_time = now
-                    return True
-            else:
-                if not self.i2c.try_lock():
-                    return False
-                try:
-                    # Read OUTX_L_XL through OUTZ_H_XL (registers 0x28 - 0x2D)
-                    self.i2c.writeto_then_readfrom(self.address, bytes([0x28]), self._buf6)
-                finally:
-                    self.i2c.unlock()
+            reading = self._read_accel_g()
+            if reading is None:
+                return False, ""
+            ax_g, ay_g, az_g = reading
 
-                ax, ay, az = struct.unpack("<hhh", self._buf6)
-                # +/-4g range: 8192 LSB/g
-                accel_mag = ((ax * ax + ay * ay + az * az) ** 0.5) / 8192.0
-                if accel_mag > self.threshold_g:
-                    self.last_shake_time = now
-                    return True
+            mag = (ax_g * ax_g + ay_g * ay_g + az_g * az_g) ** 0.5
+            dyn = abs(mag - 1.0)
+
+            if self.prev_accel is not None:
+                px, py, pz = self.prev_accel
+                dx = ax_g - px
+                dy = ay_g - py
+                dz = az_g - pz
+                jerk = (dx * dx + dy * dy + dz * dz) ** 0.5
+            else:
+                jerk = 0.0
+
+            self.prev_accel = (ax_g, ay_g, az_g)
+
+            if (now - self.last_trigger_time) < self.debounce_sec:
+                return False, ""
+
+            # 1. Single harder drop / tap to table
+            if dyn >= self.hard_drop_dyn_g or jerk >= self.hard_drop_jerk_g:
+                self.last_trigger_time = now
+                self.in_stroke = False
+                self.shake_peaks.clear()
+                return True, "HARD_DROP"
+
+            # 2. Two slowish shakes with hysteresis release
+            if dyn < self.slow_shake_release_g:
+                self.in_stroke = False
+            elif dyn >= self.slow_shake_dyn_g and not self.in_stroke:
+                self.in_stroke = True
+                self.shake_peaks = [t for t in self.shake_peaks if (now - t) <= self.shake_window_sec]
+                if not self.shake_peaks or (now - self.shake_peaks[-1]) >= self.min_stroke_gap_sec:
+                    self.shake_peaks.append(now)
+                    if len(self.shake_peaks) >= 2:
+                        self.last_trigger_time = now
+                        self.in_stroke = False
+                        self.shake_peaks.clear()
+                        return True, "DOUBLE_SHAKE"
         except Exception:
-            return False
-        return False
+            return False, ""
+
+        return False, ""
 
 
 def extract_highpass_features(sample_buffer) -> tuple[float, int]:
@@ -340,7 +412,7 @@ class PDMClickDetector:
 
 
 class CircuitModeEngine:
-    """Manages visual flash modes, beat counting, and upbeat scheduling."""
+    """Manages visual flash modes (1-4), beat counting, and upbeat scheduling."""
 
     def __init__(self, pause_reset_sec: float = PAUSE_RESET_SEC) -> None:
         self.current_mode = MetronomeMode.ON_BEAT
@@ -350,7 +422,7 @@ class CircuitModeEngine:
         self.scheduled_flashes = []  # list of (target_time, color)
 
     def cycle_mode(self) -> int:
-        self.current_mode = (self.current_mode % 5) + 1
+        self.current_mode = (self.current_mode % 4) + 1
         self.beat_count = 0
         self.scheduled_flashes.clear()
         return self.current_mode
@@ -374,11 +446,6 @@ class CircuitModeEngine:
             immediate.append("RED")
 
         elif self.current_mode == MetronomeMode.UPBEAT:
-            if ioi > 0:
-                self.scheduled_flashes.append((now + (ioi / 2.0), "BLUE"))
-
-        elif self.current_mode == MetronomeMode.DOUBLE_TIME:
-            immediate.append("RED")
             if ioi > 0:
                 self.scheduled_flashes.append((now + (ioi / 2.0), "BLUE"))
 
@@ -427,7 +494,7 @@ def get_battery_voltage() -> float:
 def init_hardware(leds: StatusLEDs):
     """Run startup diagnostics, power up PDM mic and IMU, return (mic, i2c)."""
     print("\n" + "=" * 58)
-    print("   AI METRONOME POC v2 — XIAO nRF52840 SENSE INIT")
+    print("   AI METRONOME POC v2 -- XIAO nRF52840 SENSE INIT")
     print("=" * 58)
 
     leds.set_rgb(False, False, True)  # Solid Blue LED during init
@@ -506,11 +573,11 @@ def init_hardware(leds: StatusLEDs):
         return None, None
     print(f"  [MIC]  Signal Health    : OK (DC range {min_sample}..{max_sample}, span={span})")
 
-    # 5. Initialize Dedicated IMU I2C Bus
+    # 5. Initialize Dedicated IMU I2C Bus at 400 kHz
     i2c_bus = None
     try:
-        i2c_bus = busio.I2C(board.IMU_SCL, board.IMU_SDA)
-        print("  [IMU]  I2C Bus          : Operational (board.IMU_SCL, board.IMU_SDA)")
+        i2c_bus = busio.I2C(board.IMU_SCL, board.IMU_SDA, frequency=400000)
+        print("  [IMU]  I2C Bus          : Operational (board.IMU_SCL, board.IMU_SDA @ 400kHz)")
     except Exception as err:
         print(f"  [WARN - IMU] Could not initialize IMU I2C bus: {err}")
 
@@ -526,8 +593,8 @@ def main() -> None:
         leds.signal_fault_loop()
         return
 
-    # Accelerometer shake detector and mode engine
-    shake_detector = ShakeDetector(i2c_bus)
+    # Accelerometer gesture detector (2 slow shakes OR 1 table drop) and mode engine
+    gesture_detector = ShakeAndDropDetector(i2c_bus)
     mode_engine = CircuitModeEngine()
 
     audio_buffer = array.array("H", [0] * BUFFER_SIZE)
@@ -545,30 +612,31 @@ def main() -> None:
     print("=" * 58)
     print("[READY] Initialization OK! Metronome active.")
     print(f"[MODE]  Current: {MODE_NAMES[mode_engine.current_mode]}")
-    print("[TIP]   Shake device firmly to cycle modes (1 -> 2 -> 3 -> 4 -> 5 -> 1)\n")
+    print("[TIP]   2 slow shakes OR 1 firm drop to table cycles modes (1 -> 2 -> 3 -> 4 -> 1)\n")
 
     leds.signal_init_ok()
 
     led_off_at = 0.0
     led_is_active = False
-    loop_count = 0
 
     while True:
         # 1. Capture 8 ms audio frame via PDM DMA
         mic.record(audio_buffer, len(audio_buffer))
         now = time.monotonic()
-        loop_count += 1
 
-        # 2. Check for shake gesture every 4 frames (~32 ms)
-        if loop_count % 4 == 0:
-            if shake_detector.check_shake(now):
-                new_mode = mode_engine.cycle_mode()
-                print(f"\n{'*'*50}")
-                print(f"[SHAKE DETECTED] >>> Switched to {MODE_NAMES[new_mode]} <<<")
-                print(f"{'*'*50}\n")
-                leds.signal_mode_change(new_mode)
-                led_is_active = False
-                continue
+        # 2. Poll accelerometer every frame (125 Hz) so fast table drops & slow shakes never miss
+        triggered, gesture_kind = gesture_detector.check_gesture(now)
+        if triggered:
+            new_mode = mode_engine.cycle_mode()
+            print(f"\n{'*'*58}")
+            print(f"[GESTURE: {gesture_kind}] >>> Switched to {MODE_NAMES[new_mode]} <<<")
+            print(f"{'*'*58}\n")
+            leds.signal_mode_change(new_mode)
+            led_is_active = False
+            # Reset audio click refractory timer so table drop sound doesn't trigger a beat flash
+            detector.last_click_time = time.monotonic()
+            gesture_detector.last_trigger_time = time.monotonic()
+            continue
 
         # 3. Process audio frame for click
         is_click, hp_mean, hp_peak = detector.process_frame(audio_buffer, now)
@@ -592,7 +660,7 @@ def main() -> None:
                 led_is_active = True
                 led_off_at = now + LED_FLASH_SEC
 
-        # 4. Check for scheduled upbeat flashes (Mode 2 or Mode 3)
+        # 4. Check for scheduled upbeat flashes (Mode 2)
         due_flashes = mode_engine.get_due_flashes(now)
         if "BLUE" in due_flashes:
             leds.set_rgb(False, False, True)

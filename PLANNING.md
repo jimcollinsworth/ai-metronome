@@ -17,17 +17,17 @@ Active backlog and task tracking for `ai-metronome`.
   - [x] `board.MIC_PWR` power gate activation, `audiobusio.PDMIn` warmup, and signal health verification
   - [x] Active-low RGB LED state feedback (Blue = init/calibrating, Green = init OK, Red = real-time click pulse)
 - [x] On-device verification of POC v1 by Jim ("ok, that worked great")
-- [x] 5-Mode Visual Flash Engine & Accelerometer Shake Switcher:
+- [x] 4-Mode Visual Flash Engine, Dual-Gesture Switcher & HIL CLI Runner:
   - [x] Mode 1: On-Beat ($1\times$ click, Red)
   - [x] Mode 2: In-Between / Upbeat ($t + \text{IOI}/2$, Blue)
-  - [x] Mode 3: Double-Time ($2\times$ flashes per click: Red on beat + Blue on upbeat)
-  - [x] Mode 4: 4/4 Meter (Green on beat 1, NO LED on beats 2, 3, 4)
-  - [x] Mode 5: 3/4 Meter (Green on beat 1, NO LED on beats 2, 3)
-  - [x] Onboard LSM6DS3TR-C shake gesture detection ($|a| > 2.3g$, 0.6s debounce) via `board.IMU_PWR` and `board.IMU_SCL` / `board.IMU_SDA`
-  - [x] Cyan LED blink mode confirmation on shake
-  - [x] Brighter LED flashes (extended pulse width from 45ms to 75ms)
+  - [x] Mode 3: 4/4 Meter (Green on beat 1, NO LED on beats 2, 3, 4)
+  - [x] Mode 4: 3/4 Meter (Green on beat 1, NO LED on beats 2, 3)
+  - [x] High-rate (125 Hz poll / 416 Hz ODR) LSM6DS3TR-C gesture detection supporting either **2 slowish shakes** or **1 harder drop to the table**
+  - [x] Unmistakable visual mode confirmation: 350ms Bright White burst (all 3 RGB diodes) followed by $N$ slow pulses in the new mode's color
+  - [x] Extended LED pulse width to 130ms (`LED_FLASH_SEC = 0.130`)
+  - [x] Hardware-in-the-Loop (HIL) CLI tool (`tools/xiao_cli.py` / `uv run xiao-cli`) for automated code push (`deploy`) and 6-point hardware verification (`hil-test`)
   - [x] Comprehensive unit tests in `tests/test_mode_engine.py`
-- [ ] On-device verification of POC v2 on XIAO nRF52840 Sense
+- [x] Automated HIL verification of POC v2 on physical XIAO nRF52840 Sense (`COM9` / `D:\`)
 - [ ] Phase 2 POC: Port click detector & mode engine firmware to C++ (`src/xiao_nrf52840_sense/cpp/`)
 - [ ] Phase 3 POC: Port click detector & mode engine firmware to Rust (`src/xiao_nrf52840_sense/rust/`)
 
