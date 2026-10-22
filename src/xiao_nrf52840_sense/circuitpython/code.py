@@ -40,6 +40,12 @@ import busio
 import digitalio
 import microcontroller
 
+try:
+    import neopixel_write
+    HAS_NEOPIXEL_WRITE = True
+except ImportError:
+    HAS_NEOPIXEL_WRITE = False
+
 # Optional Adafruit driver support if present in /lib
 try:
     from adafruit_lsm6ds.lsm6ds3trc import LSM6DS3TRC  # type: ignore
@@ -55,6 +61,11 @@ CALIBRATION_FRAMES = 25    # Ambient noise calibration window
 LED_FLASH_SEC = 0.130      # 130 ms extended pulse duration for maximum perceived brightness
 PAUSE_RESET_SEC = 2.0      # Reset meter beat count & unlock PLL if clicks pause longer than 2.0s
 LEAD_COMP_SEC = 0.003      # 3.0 ms anticipatory lead to center flash timing across the 6.8 ms frame
+
+# --- NeoPixel Stick (CJMCU-2812-8) Constants ---
+NEOPIXEL_PIN_NAME = "D0"   # Hardware pin for NeoPixel DIN
+NEOPIXEL_COUNT = 8         # 8 WS2812B pixels
+NEOPIXEL_BRIGHTNESS = 0.22 # 22% brightness: vivid and clearly visible for peripheral cueing
 
 
 class MetronomeMode:
@@ -74,12 +85,32 @@ MODE_NAMES = {
 
 
 class StatusLEDs:
-    """Driver for the XIAO nRF52840 Sense onboard 3-in-1 RGB LED (Active-Low)."""
+    """Unified driver for both the XIAO nRF52840 Sense onboard 3-in-1 RGB LED and CJMCU-2812-8 stick."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        neopixel_pin_name: str = NEOPIXEL_PIN_NAME,
+        num_pixels: int = NEOPIXEL_COUNT,
+        brightness: float = NEOPIXEL_BRIGHTNESS,
+    ) -> None:
         self.red = self._init_pin(getattr(board, "LED_RED", getattr(board, "LED", None)))
         self.green = self._init_pin(getattr(board, "LED_GREEN", None))
         self.blue = self._init_pin(getattr(board, "LED_BLUE", None))
+
+        self.num_pixels = num_pixels
+        self.brightness = brightness
+        self.np_pin = None
+        self._np_buf = bytearray(num_pixels * 3)
+
+        if HAS_NEOPIXEL_WRITE:
+            pin_obj = getattr(board, neopixel_pin_name, None)
+            if pin_obj is not None:
+                try:
+                    self.np_pin = digitalio.DigitalInOut(pin_obj)
+                    self.np_pin.direction = digitalio.Direction.OUTPUT
+                    print(f"  [LED]  NeoPixel Stick   : Active on board.{neopixel_pin_name} ({num_pixels} LEDs, {int(brightness*100)}% subtle glow)")
+                except Exception as err:
+                    print(f"  [WARN - LED] Could not bind NeoPixel pin {neopixel_pin_name}: {err}")
         self.all_off()
 
     @staticmethod
@@ -95,8 +126,8 @@ class StatusLEDs:
             print(f"[WARN - LED] Could not bind LED pin {pin_obj}: {err}")
             return None
 
-    def set_rgb(self, r: bool, g: bool, b: bool) -> None:
-        """Set Red, Green, Blue states (True = ON, False = OFF)."""
+    def set_onboard_rgb(self, r: bool, g: bool, b: bool) -> None:
+        """Set onboard Red, Green, Blue states (True = ON, False = OFF)."""
         if self.red is not None:
             self.red.value = not r
         if self.green is not None:
@@ -104,39 +135,189 @@ class StatusLEDs:
         if self.blue is not None:
             self.blue.value = not b
 
+    def set_rgb(self, r: bool, g: bool, b: bool) -> None:
+        """Legacy helper for hardware diagnostic and startup routines."""
+        self.set_onboard_rgb(r, g, b)
+
+    def _write_neopixels(self, frame: list[tuple[int, int, int]]) -> None:
+        if self.np_pin is None:
+            return
+        b = self.brightness
+        buf = self._np_buf
+        for i in range(min(len(frame), self.num_pixels)):
+            r, g, b_val = frame[i]
+            idx = i * 3
+            # WS2812 GRB ordering
+            buf[idx] = int(g * b)
+            buf[idx + 1] = int(r * b)
+            buf[idx + 2] = int(b_val * b)
+        neopixel_write.neopixel_write(self.np_pin, buf)
+
+    def run_startup_pattern(self) -> None:
+        """Quick visible sweep across all 8 pixels at power-on to verify wiring & hardware."""
+        if self.np_pin is None:
+            return
+        # 1. Quick swipe from 0 to 7 in bright cyan/blue (35ms per pixel)
+        for i in range(self.num_pixels):
+            frame = [(0, 0, 0)] * self.num_pixels
+            frame[i] = (0, 180, 255)
+            if i > 0:
+                frame[i - 1] = (0, 40, 80)
+            self._write_neopixels(frame)
+            time.sleep(0.035)
+        # 2. Brief all-8 warm amber burst (120ms)
+        self._write_neopixels([(220, 140, 20)] * self.num_pixels)
+        time.sleep(0.12)
+        self.all_off()
+        time.sleep(0.06)
+
+    def _render_frame(self, mode: int, beat: int, is_upbeat: bool) -> list[tuple[int, int, int]]:
+        frame = [(0, 0, 0)] * self.num_pixels
+
+        if is_upbeat:
+            # Mode 2 Upbeat: Outer wings in bright Cyan-Blue [XX......XX]
+            c = (0, 120, 255)
+            frame[0] = c
+            frame[1] = c
+            frame[6] = c
+            frame[7] = c
+            return frame
+
+        if mode == MetronomeMode.ON_BEAT:
+            # Mode 1: Pendulum Rock in warm Amber-Red
+            # Odd beat: left cluster [1, 2, 3] | Even beat: right cluster [4, 5, 6]
+            c = (255, 40, 0)
+            if beat % 2 == 1:
+                frame[1] = c
+                frame[2] = c
+                frame[3] = c
+            else:
+                frame[4] = c
+                frame[5] = c
+                frame[6] = c
+
+        elif mode == MetronomeMode.UPBEAT:
+            # Mode 2 Downbeat (physical click): Center anchor in vibrant Purple
+            # [..XX..]
+            c = (180, 0, 220)
+            frame[3] = c
+            frame[4] = c
+
+        elif mode == MetronomeMode.METER_4_4:
+            # Mode 3: 4/4 Progressive Measure Bar (2 LEDs per beat)
+            # Beat 1: [0, 1] - Accent Green
+            # Beat 2: [2, 3] - Warm Amber tick
+            # Beat 3: [4, 5] - Vivid Teal (half-measure secondary accent)
+            # Beat 4: [6, 7] - Warm Amber tick
+            if beat == 1:
+                frame[0] = (0, 255, 40)
+                frame[1] = (0, 255, 40)
+            elif beat == 2:
+                frame[2] = (200, 150, 40)
+                frame[3] = (200, 150, 40)
+            elif beat == 3:
+                frame[4] = (0, 220, 180)
+                frame[5] = (0, 220, 180)
+            elif beat == 4:
+                frame[6] = (200, 150, 40)
+                frame[7] = (200, 150, 40)
+
+        elif mode == MetronomeMode.METER_3_4:
+            # Mode 4: 3/4 Waltz Triple Step (3 - 2 - 3)
+            # Beat 1: Left 3 [0, 1, 2] - Accent Green
+            # Beat 2: Center 2 [3, 4]   - Warm Amber tick
+            # Beat 3: Right 3 [5, 6, 7]  - Warm Amber tick
+            if beat == 1:
+                frame[0] = (0, 255, 40)
+                frame[1] = (0, 255, 40)
+                frame[2] = (0, 255, 40)
+            elif beat == 2:
+                frame[3] = (200, 150, 40)
+                frame[4] = (200, 150, 40)
+            elif beat == 3:
+                frame[5] = (200, 150, 40)
+                frame[6] = (200, 150, 40)
+                frame[7] = (200, 150, 40)
+
+        return frame
+
+    def show_beat(self, mode: int, beat_num: int, color_tag: str, is_upbeat: bool = False) -> None:
+        """Flash appropriate visual feedback on both onboard RGB and NeoPixel stick."""
+        # 1. Onboard 3-in-1 LED
+        if color_tag == "RED":
+            self.set_onboard_rgb(True, False, False)
+        elif color_tag == "GREEN":
+            self.set_onboard_rgb(False, True, False)
+        elif color_tag == "BLUE":
+            self.set_onboard_rgb(False, False, True)
+        else:
+            self.set_onboard_rgb(False, False, False)
+
+        # 2. NeoPixel Stick
+        if self.np_pin is not None:
+            frame = self._render_frame(mode, beat_num, is_upbeat)
+            self._write_neopixels(frame)
+
     def all_off(self) -> None:
-        self.set_rgb(False, False, False)
+        self.set_onboard_rgb(False, False, False)
+        if self.np_pin is not None:
+            for i in range(len(self._np_buf)):
+                self._np_buf[i] = 0
+            neopixel_write.neopixel_write(self.np_pin, self._np_buf)
 
     def signal_init_ok(self) -> None:
-        """Blink Green LED 3 times to indicate successful initialization."""
+        """Blink Green 3 times across both onboard LED and all 8 NeoPixels."""
         self.all_off()
         for _ in range(3):
-            self.set_rgb(False, True, False)
+            self.set_onboard_rgb(False, True, False)
+            if self.np_pin is not None:
+                self._write_neopixels([(0, 255, 40)] * self.num_pixels)
             time.sleep(0.15)
             self.all_off()
             time.sleep(0.09)
 
     def signal_mode_change(self, mode_num: int) -> None:
-        """Unmistakable visual confirmation:
-        1. Solid Bright White flash (all 3 RGB diodes ON for 350ms) to confirm gesture.
-        2. 220ms dark pause.
-        3. N distinct 200ms pulses in the new mode's color (1=Red, 2=Blue, 3=Green, 4=Green).
-        """
+        """Unmistakable visual confirmation across both onboard LED and NeoPixel stick."""
         self.all_off()
-        self.set_rgb(True, True, True)
+        # 1. Soft white burst across all LEDs
+        self.set_onboard_rgb(True, True, True)
+        if self.np_pin is not None:
+            self._write_neopixels([(120, 120, 120)] * self.num_pixels)
         time.sleep(0.35)
         self.all_off()
         time.sleep(0.22)
 
+        # 2. Distinct pulses indicating the new mode
         if mode_num == MetronomeMode.ON_BEAT:
-            color = (True, False, False)   # Red
+            onboard_c = (True, False, False)
+            stick_frame = [(0, 0, 0)] * self.num_pixels
+            stick_frame[2] = (140, 20, 0)
+            stick_frame[3] = (140, 20, 0)
+            stick_frame[4] = (140, 20, 0)
+            stick_frame[5] = (140, 20, 0)
         elif mode_num == MetronomeMode.UPBEAT:
-            color = (False, False, True)   # Blue
-        else:
-            color = (False, True, False)   # Green (Modes 3 & 4)
+            onboard_c = (False, False, True)
+            stick_frame = [(0, 0, 0)] * self.num_pixels
+            stick_frame[0] = (0, 70, 220)
+            stick_frame[1] = (0, 70, 220)
+            stick_frame[6] = (0, 70, 220)
+            stick_frame[7] = (0, 70, 220)
+        elif mode_num == MetronomeMode.METER_4_4:
+            onboard_c = (False, True, False)
+            stick_frame = [(0, 0, 0)] * self.num_pixels
+            stick_frame[0] = (0, 180, 50)
+            stick_frame[1] = (0, 180, 50)
+        else:  # METER_3_4
+            onboard_c = (False, True, False)
+            stick_frame = [(0, 0, 0)] * self.num_pixels
+            stick_frame[0] = (0, 180, 50)
+            stick_frame[1] = (0, 180, 50)
+            stick_frame[2] = (0, 180, 50)
 
         for _ in range(mode_num):
-            self.set_rgb(*color)
+            self.set_onboard_rgb(*onboard_c)
+            if self.np_pin is not None:
+                self._write_neopixels(stick_frame)
             time.sleep(0.20)
             self.all_off()
             time.sleep(0.16)
@@ -144,9 +325,13 @@ class StatusLEDs:
     def signal_fault_loop(self) -> None:
         """Alternate Red and Blue LEDs indefinitely if critical hardware fails."""
         while True:
-            self.set_rgb(True, False, False)
+            self.set_onboard_rgb(True, False, False)
+            if self.np_pin is not None:
+                self._write_neopixels([(180, 0, 0)] * self.num_pixels)
             time.sleep(0.25)
-            self.set_rgb(False, False, True)
+            self.set_onboard_rgb(False, False, True)
+            if self.np_pin is not None:
+                self._write_neopixels([(0, 0, 180)] * self.num_pixels)
             time.sleep(0.25)
 
 
@@ -475,7 +660,7 @@ class CircuitModeEngine:
             candidates.append(target_t)
         return min(candidates) if candidates else None
 
-    def _emit_beat(self, beat_time: float) -> list[str]:
+    def _emit_beat(self, beat_time: float) -> list[tuple[str, int, bool]]:
         if self.current_mode == MetronomeMode.METER_4_4:
             self.beat_count = (self.beat_count % 4) + 1
         elif self.current_mode == MetronomeMode.METER_3_4:
@@ -487,13 +672,16 @@ class CircuitModeEngine:
         immediate = []
 
         if self.current_mode == MetronomeMode.ON_BEAT:
-            immediate.append("RED")
+            immediate.append(("RED", self.beat_count, False))
         elif self.current_mode == MetronomeMode.UPBEAT:
+            immediate.append(("ANCHOR", self.beat_count, False))
             if self.period > 0:
-                self.scheduled_flashes.append((beat_time + (self.period / 2.0), "BLUE"))
+                self.scheduled_flashes.append((beat_time + (self.period / 2.0), ("BLUE", self.beat_count, True)))
         elif self.current_mode in (MetronomeMode.METER_4_4, MetronomeMode.METER_3_4):
             if self.beat_count == 1:
-                immediate.append("GREEN")
+                immediate.append(("GREEN", 1, False))
+            else:
+                immediate.append(("TICK", self.beat_count, False))
 
         return immediate
 
@@ -506,10 +694,10 @@ class CircuitModeEngine:
                 self.period = (1.0 - self.freq_gain) * self.period + (self.freq_gain * implied_period)
                 return
 
-    def on_click(self, onset_time: float, ioi: float = 0.5) -> tuple[list[str], float]:
+    def on_click(self, onset_time: float, ioi: float = 0.5) -> tuple[list[tuple[str, int, bool]], float]:
         """Process recognized click at `onset_time` to lock/adjust the PLL clock.
 
-        Returns (immediate_colors, phase_error_ms).
+        Returns (immediate_events, phase_error_ms).
         """
         if self.last_click_time is not None and (onset_time - self.last_click_time) > self.pause_reset_sec:
             self.reset_clock()
@@ -542,7 +730,7 @@ class CircuitModeEngine:
             self.last_beat_time = corrected_beat
             self.next_beat_time = corrected_beat + self.period
             if self.current_mode == MetronomeMode.UPBEAT and self.scheduled_flashes:
-                self.scheduled_flashes[-1] = (corrected_beat + (self.period / 2.0), "BLUE")
+                self.scheduled_flashes[-1] = (corrected_beat + (self.period / 2.0), ("BLUE", self.beat_count, True))
             return [], (phase_err * 1000.0)
 
         # Check if click arrived slightly ahead of upcoming next_beat_time
@@ -561,8 +749,8 @@ class CircuitModeEngine:
         self.next_beat_time = onset_time + self.period
         return flashes, 0.0
 
-    def get_due_flashes(self, now: float) -> list[str]:
-        """Advance autonomous internal beat clock and return any colors due at or before `now`."""
+    def get_due_flashes(self, now: float) -> list[tuple[str, int, bool]]:
+        """Advance autonomous internal beat clock and return any events due at or before `now`."""
         due = []
 
         if self.is_locked and self.next_beat_time is not None and now >= self.next_beat_time:
@@ -578,11 +766,11 @@ class CircuitModeEngine:
                 due.extend(self._emit_beat(beat_t))
 
         remaining = []
-        for target_time, color in self.scheduled_flashes:
+        for target_time, event in self.scheduled_flashes:
             if target_time <= now:
-                due.append(color)
+                due.append(event)
             else:
-                remaining.append((target_time, color))
+                remaining.append((target_time, event))
         self.scheduled_flashes = remaining
         return due
 
@@ -617,6 +805,10 @@ def init_hardware(leds: StatusLEDs):
     print("=" * 58)
 
     leds.set_rgb(False, False, True)  # Solid Blue LED during init
+
+    # Run NeoPixel stick startup self-test sweep across all 8 pixels
+    leds.run_startup_pattern()
+    print("  [LED]  NeoPixel Stick   : Self-test sweep OK (8 pixels verified)")
 
     # 1. Power & Thermal Diagnostics
     vbat = get_battery_voltage()
@@ -705,18 +897,18 @@ def init_hardware(leds: StatusLEDs):
     return mic, i2c_bus
 
 
-def _trigger_led_colors(leds: StatusLEDs, colors: list[str], now: float) -> tuple[bool, float]:
-    """Turn on the highest-priority LED color in `colors` immediately and return (active, off_at)."""
-    if "RED" in colors:
-        leds.set_rgb(True, False, False)
-        return True, now + LED_FLASH_SEC
-    if "GREEN" in colors:
-        leds.set_rgb(False, True, False)
-        return True, now + LED_FLASH_SEC
-    if "BLUE" in colors:
-        leds.set_rgb(False, False, True)
-        return True, now + LED_FLASH_SEC
-    return False, 0.0
+def _trigger_led_colors(
+    leds: StatusLEDs,
+    events: list[tuple[str, int, bool]],
+    now: float,
+    current_mode: int,
+) -> tuple[bool, float]:
+    """Turn on appropriate visual feedback across onboard RGB and NeoPixel stick."""
+    if not events:
+        return False, 0.0
+    color_tag, beat_num, is_upbeat = events[0]
+    leds.show_beat(current_mode, beat_num, color_tag, is_upbeat)
+    return True, now + LED_FLASH_SEC
 
 
 def main() -> None:
@@ -757,7 +949,7 @@ def main() -> None:
         now = time.monotonic()
         due_pre = mode_engine.get_due_flashes(now + LEAD_COMP_SEC)
         if due_pre:
-            led_is_active, led_off_at = _trigger_led_colors(leds, due_pre, now)
+            led_is_active, led_off_at = _trigger_led_colors(leds, due_pre, now, mode_engine.current_mode)
 
         # 2. Capture 5.0 ms audio frame via PDM DMA (zero spin-wait stall)
         mic.record(audio_buffer, len(audio_buffer))
@@ -766,7 +958,7 @@ def main() -> None:
         # 3. Post-DMA Immediate Internal Clock Check (before any DSP/I2C/Serial work!)
         due_post = mode_engine.get_due_flashes(frame_end + LEAD_COMP_SEC)
         if due_post:
-            led_is_active, led_off_at = _trigger_led_colors(leds, due_post, frame_end)
+            led_is_active, led_off_at = _trigger_led_colors(leds, due_post, frame_end, mode_engine.current_mode)
 
         # 4. Process audio frame for click & adjust PLL phase/frequency
         is_click, hp_mean, hp_peak, onset_time = detector.process_frame(audio_buffer, frame_end)
@@ -774,7 +966,9 @@ def main() -> None:
             immediate, phase_err_ms = mode_engine.on_click(onset_time, detector.avg_ioi)
             # Fire LED BEFORE printing to serial so USB I/O never delays the flash!
             if immediate:
-                led_is_active, led_off_at = _trigger_led_colors(leds, immediate, time.monotonic())
+                led_is_active, led_off_at = _trigger_led_colors(
+                    leds, immediate, time.monotonic(), mode_engine.current_mode
+                )
 
             pll_bpm = mode_engine.bpm or detector.bpm
             bpm_str = f"{pll_bpm:5.1f} BPM" if pll_bpm is not None else "  --- BPM"

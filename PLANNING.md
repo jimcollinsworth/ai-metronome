@@ -34,9 +34,45 @@ Active backlog and task tracking for `ai-metronome`.
   - [x] Fixed boundary-straddling click rejection (`prev_quiet_peak` tracking)
   - [x] Autonomous internal PLL Beat Clock (`period`, `next_beat_time`, proportional phase gain `0.35`, integral frequency gain `0.22`, 3-beat coasting) driving LED timing independently of single-frame click detection jitter
   - [x] Deployed and verified on physical XIAO nRF52840 Sense via `uv run xiao-cli hil-test --deploy`
+- [x] CJMCU-2812-8 (8x WS2812B NeoPixel Stick) Integration & Subtle Multi-Mode Visualizer:
+  - [x] Built standalone CLI verification tool (`tools/test_neopixel.py`) with automatic backup, non-destructive deployment, and live monitoring
+  - [x] Integrated unified LED driver into `src/xiao_nrf52840_sense/circuitpython/code.py` driving onboard RGB and NeoPixel stick simultaneously via zero-dependency `neopixel_write`
+  - [x] Added startup hardware self-test pattern (cyan sweep + amber pulse) and 3-pulse green confirmation across all 8 pixels
+  - [x] Boosted base brightness to 22% (`NEOPIXEL_BRIGHTNESS = 0.22`) with vivid color grading for clearly visible peripheral cues across all 4 modes:
+    - Mode 1: Pendulum rock (tick-tock) alternating between left cluster `[1, 2, 3]` and right cluster `[4, 5, 6]` in warm amber-red
+    - Mode 2: Rhythmic center anchor `[3, 4]` on downbeat + cyan-blue outer wing pulse `[0, 1]` & `[6, 7]` on syncopated upbeat (&)
+    - Mode 3 (4/4): 2-LED progressive measure bar stepping across `[0,1]` (green accent) -> `[2,3]` (warm amber) -> `[4,5]` (teal) -> `[6,7]` (warm amber)
+    - Mode 4 (3/4): Symmetrical waltz triple-step stepping across `[0,1,2]` (green accent) -> `[3,4]` (warm amber) -> `[5,6,7]` (warm amber)
+  - [x] Verified 100% pass on physical hardware via `xiao-cli hil-test` (COM5 / F:\)
 - [ ] Phase 2 POC: Port click detector, PLL beat clock & mode engine firmware to C++ (`src/xiao_nrf52840_sense/cpp/`)
 - [ ] Phase 3 POC: Port click detector, PLL beat clock & mode engine firmware to Rust (`src/xiao_nrf52840_sense/rust/`)
 - [ ] Phase 4: Optimized Native Firmware (C++ / Rust) with On-Device Voice Input via TensorFlow Lite for Microcontrollers (TFLite Micro / CMSIS-NN keyword spotting on shared 16 kHz PDM DMA stream)
+
+---
+
+## Open Issues & Technical Questions
+
+### 1. Acoustic Isolation on Top of a Playing Piano
+- **The Challenge**: When the metronome sits directly on the piano, the microphone is subjected to massive acoustic and mechanical vibration:
+  - High SPL polyphonic piano chords across 27.5 Hz – 4,186+ Hz.
+  - Percussive piano hammer-strike transients that can resemble mechanical clicks.
+  - Strong structural vibrations conducted through the piano lid/body directly into the MCU board and IMU.
+  - Damper pedal thumps and sympathetic string resonance.
+- **Enclosure Advantage**: The microphone is mounted *inside* the metronome housing:
+  - The physical escapement click is in extreme near-field proximity to the mic ($<5\text{ cm}$).
+  - The wooden/plastic enclosure acts as an acoustic shield against external diffuse sound fields.
+  - Can we optimize internal microphone placement and acoustic porting/gasketing to maximize internal-to-external SNR?
+- **Intelligent Transient Discrimination**:
+  - *DSP Filtering*: First-difference high-pass ($H(z) = 1 - z^{-1}$) cancels low-frequency piano fundamentals, but piano hammer strikes have high-frequency content. Needs evaluation of higher-order bandpass filters (e.g., 2.5 kHz–5.5 kHz) where mechanical escapement clicks have peak spectral density.
+  - *Transient Shape Analysis*: Mechanical escapement clicks feature near-instantaneous attack ($< 1\,\text{ms}$) and very rapid decay ($< 5\,\text{ms}$), whereas piano hammer transients have distinctive decay envelopes and immediate harmonic overtone structures.
+  - *TinyML / TFLite Micro Classification*: Evaluate a tiny 1D-CNN or spectrogram-based classifier running under CMSIS-NN to distinguish mechanical escapement clicks from piano strikes, room clatter, and voice.
+  - *PLL Coasting Resilience*: The autonomous PLL clock already coasts through up to 3 missed beats; can it be tuned to reject out-of-phase spurious piano transients that don't match the active tempo grid?
+
+### 2. Self-Sound Cancellation (Internal Speaker Integration)
+- **The Challenge**: When an onboard audio speaker or piezo transducer is added in a future phase (e.g., for audio metronome clicks, voice feedback, or count-in prompts), the microphone will pick up the device's own audio at extreme SPL ($>80\text{ dB}$).
+- **Mitigation Architecture**:
+  - *Synchronous Blanking / Ducking Gate*: Since the MCU timing engine knows exact sub-millisecond playback timestamps, the click detection input can be momentarily blanked or refractory-suppressed during outbound speaker pulses.
+  - *Acoustic Echo Cancellation (AEC)*: For continuous or voice audio, feed the digital playback reference signal into a normalized least-mean-squares (NLMS) filter to subtract self-sound from the microphone stream before transient detection.
 
 ---
 
