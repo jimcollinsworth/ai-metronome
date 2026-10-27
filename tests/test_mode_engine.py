@@ -195,6 +195,28 @@ def test_mode_switching_preserves_flywheel_tempo_and_pll_lock():
     assert abs(engine.period - 0.5) < 1e-6
 
 
+def test_pll_adapts_to_slower_tempo():
+    """Verify metronome successfully slows down when clicks slow down (e.g. 150 BPM to 75 BPM)."""
+    engine = ModeEngine(initial_mode=MetronomeMode.ON_BEAT)
+    # Lock at 150 BPM (0.40s period)
+    engine.on_click(now=1.0, ioi=0.40)
+    engine.on_click(now=1.4, ioi=0.40)
+    engine.on_click(now=1.8, ioi=0.40)
+    assert engine.is_locked is True
+    assert abs(engine.period - 0.40) < 1e-4
+
+    # Now slow down to 75 BPM (0.80s period)
+    # Click 1 at 2.60s (0.80s later)
+    engine.on_click(now=2.60, ioi=0.80)
+    # Click 2 at 3.40s (0.80s later) - confirms slower tempo!
+    engine.on_click(now=3.40, ioi=0.80)
+
+    # Must have slowed down to ~0.80s (~75 BPM)!
+    assert engine.is_locked is True
+    assert abs(engine.period - 0.80) < 0.05
+    assert abs(engine.bpm - 75.0) < 5.0
+
+
 def test_pll_internal_clock_fires_on_schedule_and_filters_jitter():
     """Verify internal PLL clock dims until locked (3 clicks / 2 intervals), fires on schedule, and filters jitter."""
     engine = ModeEngine(initial_mode=MetronomeMode.ON_BEAT)

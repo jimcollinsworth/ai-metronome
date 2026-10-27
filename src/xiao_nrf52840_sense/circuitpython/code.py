@@ -718,6 +718,7 @@ class CircuitModeEngine:
         self.last_beat_time = None
         self.next_beat_time = None
         self.coasted_beats = 0
+        self._prev_dt = None
         self.scheduled_flashes = []  # list of (target_time, color, brightness)
 
     @property
@@ -733,6 +734,7 @@ class CircuitModeEngine:
         self.last_beat_time = None
         self.next_beat_time = None
         self.coasted_beats = 0
+        self._prev_dt = None
         self.scheduled_flashes.clear()
 
     def set_mode(self, mode_num: int) -> int:
@@ -778,11 +780,8 @@ class CircuitModeEngine:
     def _update_period_from_interval(self, measured_dt: float) -> None:
         if not (0.20 <= measured_dt <= 3.0):
             return
-        for mult in (1, 2):
-            implied_period = measured_dt / mult
-            if abs(implied_period - self.period) < (0.28 * self.period):
-                self.period = (1.0 - self.freq_gain) * self.period + (self.freq_gain * implied_period)
-                return
+        if abs(measured_dt - self.period) < (0.35 * self.period):
+            self.period = (1.0 - self.freq_gain) * self.period + (self.freq_gain * measured_dt)
 
     def on_click(self, onset_time: float, ioi: float = 0.5) -> tuple[list[tuple[str, int, bool, float]], float]:
         """Process recognized click at `onset_time` to lock/adjust the PLL clock.
@@ -828,31 +827,47 @@ class CircuitModeEngine:
             return self._emit_beat(onset_time), 0.0
 
         # Locked PLL state:
-        # 1. Aligns with recent beat:
-        if self.last_beat_time is not None and abs(onset_time - self.last_beat_time) < (0.40 * self.period):
+        # Case A: Click aligns with recent beat (within 35% of period)
+        if self.last_beat_time is not None and abs(onset_time - self.last_beat_time) < (0.35 * self.period):
             phase_err = onset_time - self.last_beat_time
-            if measured_dt is not None and measured_dt < (self.period * 2.5):
+            if measured_dt is not None and 0.20 <= measured_dt <= 2.5:
                 self._update_period_from_interval(measured_dt)
             corrected_beat = self.last_beat_time + (self.phase_gain * phase_err)
             self.last_beat_time = corrected_beat
             self.next_beat_time = corrected_beat + self.period
+            self._prev_dt = None
             if self.current_mode == MetronomeMode.UPBEAT and self.scheduled_flashes:
                 _, event = self.scheduled_flashes[-1]
                 self.scheduled_flashes[-1] = (corrected_beat + (self.period / 2.0), event)
             return [], (phase_err * 1000.0)
 
-        # 2. Aligns with upcoming beat:
-        if self.next_beat_time is not None and abs(onset_time - self.next_beat_time) < (0.40 * self.period):
+        # Case B: Click aligns with upcoming scheduled beat (within 35% of period)
+        if self.next_beat_time is not None and abs(onset_time - self.next_beat_time) < (0.35 * self.period):
             phase_err = onset_time - self.next_beat_time
-            if measured_dt is not None and measured_dt < (self.period * 2.5):
+            if measured_dt is not None and 0.20 <= measured_dt <= 2.5:
                 self._update_period_from_interval(measured_dt)
             corrected_beat = self.next_beat_time + (self.phase_gain * phase_err)
             flashes = self._emit_beat(corrected_beat)
             self.next_beat_time = corrected_beat + self.period
+            self._prev_dt = None
             return flashes, (phase_err * 1000.0)
 
-        # 3. Sound resumed after silence, or out-of-phase:
-        # Snap PLL phase directly to this click! In meter modes, align to Beat 1 (downbeat)
+        # Case C: Click does NOT align with current tempo grid (slower tempo, faster tempo, or phrase start)
+        if 0.20 <= measured_dt <= 2.5:
+            if self._prev_dt is not None and abs(measured_dt - self._prev_dt) < (0.28 * measured_dt):
+                # New slower/faster tempo confirmed over 2 consecutive clicks:
+                self.period = (self._prev_dt + measured_dt) / 2.0
+                self._prev_dt = None
+            elif ioi > 0 and abs(measured_dt - ioi) < (0.22 * measured_dt):
+                # Moving-average IOI confirms the new tempo immediately:
+                self.period = (measured_dt + ioi) / 2.0
+                self._prev_dt = None
+            else:
+                self._prev_dt = measured_dt
+        else:
+            self._prev_dt = None
+
+        # Snap phase to this click with the updated period
         self.last_beat_time = onset_time
         self.next_beat_time = onset_time + self.period
         self.scheduled_flashes.clear()

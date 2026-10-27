@@ -161,6 +161,7 @@ class ModeEngine:
         self.last_beat_time: float | None = None
         self.next_beat_time: float | None = None
         self.coasted_beats: int = 0
+        self._prev_dt: float | None = None
         self._scheduled_flashes: list[FlashEvent] = []
 
     @property
@@ -178,6 +179,7 @@ class ModeEngine:
         self.last_beat_time = None
         self.next_beat_time = None
         self.coasted_beats = 0
+        self._prev_dt = None
         self._scheduled_flashes.clear()
 
     def cycle_mode(self) -> MetronomeMode:
@@ -285,29 +287,44 @@ class ModeEngine:
             return self._emit_beat(now)
 
         # 4. Locked PLL state: compare click timestamp against internal clock beats
-        # Check if click aligns with recent beat (within 40% of period)
-        if self.last_beat_time is not None and abs(now - self.last_beat_time) < (0.40 * self.period):
+        # Case A: Click aligns with recent beat (within 35% of period)
+        if self.last_beat_time is not None and abs(now - self.last_beat_time) < (0.35 * self.period):
             phase_err = now - self.last_beat_time
-            if measured_dt is not None and measured_dt < (self.period * 2.5):
+            if measured_dt is not None and 0.20 <= measured_dt <= 2.5:
                 self._update_period_from_interval(measured_dt)
             corrected_beat = self.last_beat_time + (self.phase_gain * phase_err)
             self.last_beat_time = corrected_beat
             self.next_beat_time = corrected_beat + self.period
-            # Do not emit a duplicate flash since the internal clock already fired this beat
+            self._prev_dt = None
             return []
 
-        # Check if click aligns with the upcoming scheduled `next_beat_time`
-        if self.next_beat_time is not None and abs(now - self.next_beat_time) < (0.40 * self.period):
+        # Case B: Click aligns with upcoming scheduled beat (within 35% of period)
+        if self.next_beat_time is not None and abs(now - self.next_beat_time) < (0.35 * self.period):
             phase_err = now - self.next_beat_time
-            if measured_dt is not None and measured_dt < (self.period * 2.5):
+            if measured_dt is not None and 0.20 <= measured_dt <= 2.5:
                 self._update_period_from_interval(measured_dt)
             corrected_beat = self.next_beat_time + (self.phase_gain * phase_err)
             flashes = self._emit_beat(corrected_beat)
             self.next_beat_time = corrected_beat + self.period
+            self._prev_dt = None
             return flashes
 
-        # Sound returned after silence, or out-of-phase:
-        # Snap PLL phase directly to this click! In meter modes, align to Beat 1 (downbeat)
+        # Case C: Click does NOT align with current tempo grid (slower tempo, faster tempo, or phrase start)
+        if 0.20 <= measured_dt <= 2.5:
+            if self._prev_dt is not None and abs(measured_dt - self._prev_dt) < (0.28 * measured_dt):
+                # New slower/faster tempo confirmed over 2 consecutive clicks:
+                self.period = (self._prev_dt + measured_dt) / 2.0
+                self._prev_dt = None
+            elif ioi > 0 and abs(measured_dt - ioi) < (0.22 * measured_dt):
+                # Moving-average IOI confirms the new tempo immediately:
+                self.period = (measured_dt + ioi) / 2.0
+                self._prev_dt = None
+            else:
+                self._prev_dt = measured_dt
+        else:
+            self._prev_dt = None
+
+        # Snap phase to this click with the updated period
         self.last_beat_time = now
         self.next_beat_time = now + self.period
         self._scheduled_flashes.clear()
@@ -317,15 +334,11 @@ class ModeEngine:
         return flashes
 
     def _update_period_from_interval(self, measured_dt: float) -> None:
-        """Smoothly adjust internal oscillator period from 1-beat or 2-beat click interval."""
+        """Smoothly adjust internal oscillator period from click interval."""
         if not (0.20 <= measured_dt <= 3.0):
             return
-        # Check if measured_dt is ~1 beat or ~2 beats (in case 1 click was missed)
-        for mult in (1, 2):
-            implied_period = measured_dt / mult
-            if abs(implied_period - self.period) < (0.28 * self.period):
-                self.period = (1.0 - self.freq_gain) * self.period + (self.freq_gain * implied_period)
-                return
+        if abs(measured_dt - self.period) < (0.35 * self.period):
+            self.period = (1.0 - self.freq_gain) * self.period + (self.freq_gain * measured_dt)
 
     def get_due_flashes(self, now: float) -> list[FlashEvent]:
         """Advance the autonomous internal beat clock and return any flashes due at or before `now`."""

@@ -4,6 +4,28 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-27 — Dynamic Tempo Adaptation (Deceleration & Acceleration Tracking)
+
+> [!NOTE] User Instructions & Guidance:
+> - *"i can't seem to slow the clicking down now, it hears the click but doesnt slow down"*
+
+### ADR 016: Dynamic Tempo Adaptation for Slower and Faster Metronome Rates
+- **Context**: When the user slowed down their physical metronome (e.g. from 150 BPM to 75 BPM), the AI Metronome failed to decelerate. Two factors caused this:
+  1. `_update_period_from_interval()` tested `mult in (1, 2)`, so when `measured_dt` doubled (slowing by half), it matched `mult = 2` ($2\times$) and assumed the user was still at the fast speed with 1 missed click, preventing any downward tempo adjustment.
+  2. The out-of-phase branch snapped phase to the click but never updated `self.period`, causing future flywheel beats to continue firing at the old fast tempo.
+- **Decision & Implementation**:
+  1. **Two-Click Tempo Transition Tracking (`_prev_dt`)**:
+     - Added `_prev_dt` tracking in both `CircuitModeEngine` and `ModeEngine`.
+     - When physical clicks arrive at a new interval outside the ongoing beat window (e.g. slowing down from 150 BPM to 75 BPM or speeding up to 180 BPM), the first click snaps the phase and records the interval, and the second consecutive click at that rate immediately adapts `self.period = (prev_dt + measured_dt) / 2.0`.
+     - Also integrates moving-average IOI (`detector.avg_ioi`) to confirm and snap the new tempo on the first interval when consistent.
+  2. **Harmonic Multiplier Removal**:
+     - Removed the restrictive `mult = 2` branch in `_update_period_from_interval()`, ensuring deliberate tempo changes are not mistaken for missed beats.
+  3. **Verification**:
+     - Added unit test `test_pll_adapts_to_slower_tempo` in `tests/test_mode_engine.py` (17/17 tests passing).
+     - Deployed to device (`CIRCUITPY`), passed all 6 hardware HIL checkpoints in 2.52s.
+
+---
+
 ## 2026-10-27 — Seamless Mode Switching with Preserved Flywheel Tempo & PLL Lock
 
 > [!NOTE] User Instructions & Guidance:
