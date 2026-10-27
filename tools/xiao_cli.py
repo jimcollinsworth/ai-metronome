@@ -34,6 +34,13 @@ RUST_ELF_PATH = (
     / "ai-metronome-rust"
 )
 DEFAULT_UF2_OUTPUT_PATH = REPO_ROOT / "build" / "ai-metronome-rust.uf2"
+DEFAULT_CIRCUITPYTHON_URL = (
+    "https://adafruit-circuit-python.s3.amazonaws.com/bin/Seeed_XIAO_nRF52840_Sense/en_US/"
+    "adafruit-circuitpython-Seeed_XIAO_nRF52840_Sense-en_US-9.2.4.uf2"
+)
+DEFAULT_CIRCUITPYTHON_UF2_PATH = (
+    REPO_ROOT / "build" / "adafruit-circuitpython-Seeed_XIAO_nRF52840_Sense-en_US-9.2.4.uf2"
+)
 
 # UF2 Constants for Nordic nRF52840 (Adafruit UF2 Bootloader)
 UF2_MAGIC_START0 = 0x0A324655  # "UF2\n"
@@ -424,6 +431,88 @@ def cmd_rust_deploy(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_python_restore(args: argparse.Namespace) -> int:
+    """Flash official CircuitPython firmware UF2 to restore the CIRCUITPY filesystem and deploy code.py."""
+    uf2_path = Path(args.uf2).resolve() if getattr(args, "uf2", None) else DEFAULT_CIRCUITPYTHON_UF2_PATH
+    if not uf2_path.exists():
+        print("[DOWNLOAD] Fetching official CircuitPython 9.2.4 UF2 for Seeed XIAO nRF52840 Sense...")
+        print(f"           Source URL: {DEFAULT_CIRCUITPYTHON_URL}")
+        uf2_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import urllib.request
+            urllib.request.urlretrieve(DEFAULT_CIRCUITPYTHON_URL, uf2_path)
+            print(f"           -> Downloaded ({uf2_path.stat().st_size} bytes) to {uf2_path}")
+        except Exception as err:
+            print(f"[ERROR] Failed to download CircuitPython UF2: {err}")
+            return 1
+
+    info = discover_device(args.drive, args.port)
+    bootloader_drive: Path | None = None
+
+    if info.drive_path and info.volume_label and info.volume_label.upper() == "XIAO-SENSE":
+        bootloader_drive = info.drive_path
+    else:
+        if info.com_port:
+            trigger_1200bps_bootloader(info.com_port)
+        else:
+            print("[BOOTLOADER] Double-tap the physical Reset button on the XIAO to enter DFU mode...")
+
+        print("[BOOTLOADER] Waiting up to 15s for XIAO-SENSE UF2 drive to mount...")
+        deadline = time.monotonic() + 15.0
+        prompted_manual = False
+        while time.monotonic() < deadline:
+            d_path, d_label, d_boot = find_circuitpy_drive(args.drive)
+            if d_path and d_label and d_label.upper() == "XIAO-SENSE":
+                bootloader_drive = d_path
+                info.boot_out = d_boot
+                break
+            if not prompted_manual and (deadline - time.monotonic()) < 9.0:
+                print("  [TIP] If the drive hasn't appeared yet, double-click the XIAO Reset button...")
+                prompted_manual = True
+            time.sleep(0.4)
+
+    if not bootloader_drive:
+        print("[ERROR] XIAO-SENSE UF2 bootloader drive not found. Double-tap Reset and re-run.")
+        return 1
+
+    print(f"[BOOTLOADER] Mounted at {bootloader_drive}")
+    dest_uf2 = bootloader_drive / uf2_path.name
+    print(f"[FLASH] Copying CircuitPython runtime ({uf2_path.name}, {uf2_path.stat().st_size} bytes) -> {dest_uf2} ...")
+    try:
+        shutil.copyfile(uf2_path, dest_uf2)
+    except OSError:
+        pass
+
+    print("[FLASH] CircuitPython runtime flashed! Waiting up to 15s for CIRCUITPY drive to mount...")
+    circuitpy_drive: Path | None = None
+    mount_deadline = time.monotonic() + 15.0
+    time.sleep(2.0)
+    while time.monotonic() < mount_deadline:
+        d_path, d_label, _ = find_circuitpy_drive(args.drive)
+        if d_path and d_label and d_label.upper() == "CIRCUITPY":
+            circuitpy_drive = d_path
+            break
+        time.sleep(0.5)
+
+    if not circuitpy_drive:
+        print("[WARN] CIRCUITPY drive did not mount within 15s. Check USB connection or double-click Reset.")
+        return 1
+
+    print(f"[SUCCESS] CIRCUITPY drive mounted at {circuitpy_drive}!")
+
+    deploy_file = Path(args.file) if hasattr(args, "file") and args.file else DEFAULT_FIRMWARE_PATH
+    deploy_ok = deploy_firmware(deploy_file, circuitpy_drive)
+    if not deploy_ok:
+        return 1
+
+    if getattr(args, "test", False):
+        time.sleep(1.5)
+        port_dev, _, _ = find_xiao_serial_port(args.port)
+        return run_hil_test(port_dev, listen_sec=getattr(args, "listen_sec", 0.0), timeout_sec=getattr(args, "timeout", 10.0))
+
+    return 0
+
+
 def trigger_soft_reboot(ser: serial.Serial) -> None:
     """Interrupt any running script with Ctrl-C, enter REPL, and soft-reboot with Ctrl-D.
 
@@ -706,6 +795,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub_pydeploy.add_argument("--listen-sec", type=float, default=0.0, help="Seconds to listen for clicks/gestures after init")
     sub_pydeploy.add_argument("--timeout", type=float, default=10.0, help="Max seconds to wait for [READY]")
     sub_pydeploy.set_defaults(func=cmd_python_deploy)
+
+    # python-restore (Restore CircuitPython runtime and CIRCUITPY drive from Rust/DFU)
+    sub_pyrestore = sub.add_parser(
+        "python-restore",
+        aliases=["restore", "restore-circuitpython"],
+        help="Flash official CircuitPython firmware UF2 to restore CIRCUITPY drive and deploy code.py",
+    )
+    sub_pyrestore.add_argument("--uf2", help="Custom CircuitPython UF2 runtime path (defaults to cached 9.2.4)")
+    sub_pyrestore.add_argument("--file", default=str(DEFAULT_FIRMWARE_PATH), help="Source Python file to deploy after restore")
+    sub_pyrestore.add_argument("--test", action="store_true", help="Run HIL verification immediately after restore")
+    sub_pyrestore.add_argument("--listen-sec", type=float, default=0.0, help="Seconds to listen for clicks/gestures after init")
+    sub_pyrestore.add_argument("--timeout", type=float, default=10.0, help="Max seconds to wait for [READY]")
+    sub_pyrestore.set_defaults(func=cmd_python_restore)
 
     # rust-build
     sub_rbuild = sub.add_parser("rust-build", help="Compile Rust firmware and generate UF2 image")

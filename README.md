@@ -73,20 +73,36 @@ uv run xiao-cli status
 ```
 *Outputs drive mount path (e.g. `D:\`), volume label, `boot_out.txt` build info, COM port (e.g. `COM9`), and USB VID/PID.*
 
-### 2. Deploying Firmware (`deploy` / `push`)
-Pushes the firmware source to the board's flash memory. CircuitPython automatically reloads upon file write:
+### 2. Deploying CircuitPython Firmware (`python-deploy`)
+Copies `code.py` to the mounted `CIRCUITPY` flash drive. CircuitPython automatically reloads upon file write:
 ```bash
 # Push default firmware (src/xiao_nrf52840_sense/circuitpython/code.py)
-uv run xiao-cli deploy
+uv run xiao-cli python-deploy
 
 # Push and immediately trigger automated hardware-in-the-loop verification
-uv run xiao-cli deploy --test
+uv run xiao-cli python-deploy --test
 
 # Deploy a specific custom source file
-uv run xiao-cli deploy --file path/to/my_code.py
+uv run xiao-cli python-deploy --file path/to/my_code.py
 ```
+*(Aliases `deploy` and `push` are also supported for convenience: `uv run xiao-cli deploy`.)*
 
-### 3. Automated On-Device Verification (`hil-test` / `test`)
+### 3. Restoring CircuitPython from Rust (`python-restore`)
+When running bare-metal Rust, the `CIRCUITPY` USB drive is replaced by native Rust execution. To switch back to CircuitPython and restore the `CIRCUITPY` (`D:\`) filesystem in one step:
+```bash
+# Restore CircuitPython runtime and automatically deploy latest code.py
+uv run xiao-cli python-restore
+
+# Restore, deploy, and immediately run automated hardware verification
+uv run xiao-cli python-restore --test
+```
+*What this automated command does:*
+1. Automatically triggers the 1200-baud DFU bootloader (or prompts to double-tap Reset) so `XIAO-SENSE` mounts on `D:\`.
+2. Flashes the official CircuitPython runtime UF2 (cached locally in `build/`).
+3. Waits for CircuitPython to format/mount the onboard SPI flash filesystem as `CIRCUITPY` (`D:\`).
+4. Copies `src/xiao_nrf52840_sense/circuitpython/code.py` to `CIRCUITPY/code.py`.
+
+### 4. Automated On-Device Verification (`hil-test` / `test`)
 Connects to the board over serial, issues a clean soft-reboot, and validates the 6-point hardware diagnostic test suite in real time:
 ```bash
 # Run HIL tests against currently flashed firmware
@@ -106,7 +122,7 @@ uv run xiao-cli hil-test --listen-sec 15
 5. `IMU_ACCEL`: Accelerometer initialization and static 3-axis gravity readings (~1.0g vector magnitude).
 6. `CAL_AND_READY`: Dynamic ambient noise floor calibration and ready state transition.
 
-### 4. Real-Time Telemetry Monitor (`monitor` / `logs`)
+### 5. Real-Time Telemetry Monitor (`monitor` / `logs`)
 Streams live serial diagnostics at 115200 baud, showing click detections, noise floor shifts, BPM calculations, and IMU gestures:
 ```bash
 # Stream continuously (exit with Ctrl+C)
@@ -119,13 +135,13 @@ uv run xiao-cli monitor --reset
 uv run xiao-cli monitor --duration 10
 ```
 
-### 5. Board Soft-Reset (`reset`)
+### 6. Board Soft-Reset (`reset`)
 Triggers a programmatic soft-reboot over USB CDC Serial (`Ctrl+C` interrupt followed by `Ctrl+D` software restart) and displays the bootloader output:
 ```bash
 uv run xiao-cli reset
 ```
 
-### 6. Explicit Port / Drive Overrides
+### 7. Explicit Port / Drive Overrides
 If multiple boards or drives are attached, override the auto-discovery by specifying `--drive` or `--port`:
 ```bash
 uv run xiao-cli --drive E:\ --port COM4 status
@@ -134,45 +150,63 @@ uv run xiao-cli --port COM9 monitor
 
 ---
 
-## Manual Deployment & Toolchains
+## Switching Between CircuitPython and Rust
 
-### Deploying CircuitPython to the Board (`cmd.exe`)
-Copy [`src/xiao_nrf52840_sense/circuitpython/code.py`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/circuitpython/code.py) directly to the mounted `CIRCUITPY` USB drive (or use `xiao-cli`):
-
-```cmd
-:: Automated deploy & test via xiao-cli
-uv run xiao-cli python-deploy --test
-
-:: Or manual file copy (replace D: with your active drive)
-copy /Y src\xiao_nrf52840_sense\circuitpython\code.py D:\code.py
-```
+| Step | To Switch to Embedded Rust | To Switch back to CircuitPython |
+| :--- | :--- | :--- |
+| **One-Command CLI** | `uv run xiao-cli rust-deploy` | `uv run xiao-cli python-restore` |
+| **Target Drive** | `D:\` (`XIAO-SENSE` UF2 Bootloader) | `D:\` (`CIRCUITPY` FAT Filesystem) |
+| **Serial Protocol** | `usbd-serial` CDC-ACM (`115200` baud) | CircuitPython REPL CDC (`115200` baud) |
+| **Firmware File** | `build/ai-metronome-rust.uf2` | `build/adafruit-circuitpython-....uf2` + `code.py` |
 
 ---
 
-## XIAO nRF52840 Sense — Embedded Rust Firmware (`v2.6`)
+## Low-Level Toolchain Commands (`cmd.exe`)
 
-### Windows `cmd.exe` Toolchain Commands
-All commands run directly in standard Windows Command Prompt (`cmd.exe`) without external GNU toolchains or debuggers:
+In addition to the unified `xiao-cli` automation, developers can execute standard lower-level toolchain commands directly in Windows Command Prompt (`cmd.exe`):
+
+### 1. Embedded Rust Commands (`cargo`)
 
 ```cmd
-:: 1. Run Rust library unit tests natively on Windows
+:: A. Run host Rust unit tests natively on Windows (x86_64)
 cargo test --manifest-path src\xiao_nrf52840_sense\rust\Cargo.toml --lib --target x86_64-pc-windows-msvc
 
-:: 2. Cross-compile release binary and generate build\ai-metronome-rust.uf2
-uv run xiao-cli rust-build
+:: B. Cross-compile bare-metal ARM Cortex-M4F release binary (ELF)
+cargo build --manifest-path src\xiao_nrf52840_sense\rust\Cargo.toml --release --target thumbv7em-none-eabihf
 
-:: 3. Flash UF2 image to XIAO-SENSE bootloader drive
-uv run xiao-cli rust-deploy
+:: C. Convert ELF binary to Nordic nRF52840 UF2 format
+python -c "from tools.xiao_cli import elf_to_uf2; from pathlib import Path; elf_to_uf2(Path('src/xiao_nrf52840_sense/rust/target/thumbv7em-none-eabihf/release/ai-metronome-rust'), Path('build/ai-metronome-rust.uf2'))"
 
-:: 4. Run automated 6-point Hardware-in-the-Loop test over COM9
-uv run xiao-cli hil-test --port COM9
+:: D. Trigger 1200-baud DFU bootloader reset over serial (without touching board)
+python -c "import serial; s=serial.Serial('COM9', 1200); s.dtr=False; s.close()"
 
-:: 5. Interactive live serial monitor & debug console
-uv run xiao-cli monitor --port COM9
+:: E. Copy UF2 binary to bootloader drive (manual flash)
+copy /Y build\ai-metronome-rust.uf2 D:\ai-metronome-rust.uf2
 ```
 
-### Interactive Serial Debug Keys
-While connected to `uv run xiao-cli monitor`:
+### 2. CircuitPython Commands (`python` & OS commands)
+
+```cmd
+:: A. Copy code directly to the mounted CIRCUITPY flash drive
+copy /Y src\xiao_nrf52840_sense\circuitpython\code.py D:\code.py
+
+:: B. Connect to raw serial console / REPL stream
+python -m serial.tools.miniterm COM9 115200
+
+:: C. Soft-reboot the board over USB CDC serial (Ctrl-C + Ctrl-D)
+python -c "import serial, time; s=serial.Serial('COM9', 115200); s.write(b''); s.close()"
+
+:: D. Manual CircuitPython runtime restoration (from bare-metal Rust back to CIRCUITPY drive):
+::    1. Double-click the tiny Reset button on the XIAO board -> D:\ mounts as XIAO-SENSE
+::    2. Copy official CircuitPython runtime UF2:
+copy /Y build\adafruit-circuitpython-Seeed_XIAO_nRF52840_Sense-en_US-9.2.4.uf2 D:\
+::    3. Wait 3 seconds -> Board automatically boots CircuitPython and mounts as D:\ (CIRCUITPY)
+::    4. Deploy application code:
+copy /Y src\xiao_nrf52840_sense\circuitpython\code.py D:\code.py
+```
+
+### 3. Interactive Serial Debug Keys (Rust Firmware)
+While connected to `uv run xiao-cli monitor` or miniterm:
 - **`d`**: Dump internal state (noise floor, dynamic threshold, PLL BPM/lock status, IMU g/jerk, battery V, die temp).
 - **`r`**: Re-run the full hardware self-test diagnostic banner (`[DIAG]`, `[MIC]`, `[IMU]`, `[CAL]`, `[READY]`).
 - **`1`**, **`2`**, **`3`**, **`4`**: Switch modes directly (`ON_BEAT`, `IN_BETWEEN`, `4/4`, `3/4`).
@@ -192,6 +226,12 @@ While connected to `uv run xiao-cli monitor`:
 
 ## Running Unit Tests
 
-```bash
+### 1. Python Unit Test Suite (Host Algorithmic, PLL & CLI Tests)
+```cmd
 uv run pytest -v
+```
+
+### 2. Rust Unit Test Suite (Host `no_std` Core Library Tests)
+```cmd
+cargo test --manifest-path src\xiao_nrf52840_sense\rust\Cargo.toml --lib --target x86_64-pc-windows-msvc
 ```
