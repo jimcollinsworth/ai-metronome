@@ -736,9 +736,11 @@ class CircuitModeEngine:
         self.scheduled_flashes.clear()
 
     def set_mode(self, mode_num: int) -> int:
-        if 1 <= mode_num <= 4:
+        if 1 <= mode_num <= 4 and mode_num != self.current_mode:
             self.current_mode = mode_num
-            self.reset_clock()
+            self.scheduled_flashes.clear()
+            if self.current_mode in (MetronomeMode.METER_4_4, MetronomeMode.METER_3_4):
+                self.beat_count = 0
         return self.current_mode
 
     def cycle_mode(self) -> int:
@@ -1159,13 +1161,10 @@ def main() -> None:
             print(f"\n{'*'*58}")
             print(f"[GESTURE: {gesture_kind}] >>> Switched to {MODE_NAMES[new_mode]} <<<")
             print(f"{'*'*58}\n")
-            leds.signal_mode_change(new_mode)
-            led_is_active = False
             now_after = time.monotonic()
             last_activity_time = now_after
             detector.last_click_time = now_after
             gesture_detector.last_trigger_time = now_after
-            continue
 
         # 7. Check for inactivity sleep timeout (no movement & not locked to clicks)
         if (now - last_activity_time) >= IDLE_SLEEP_SEC and not mode_engine.is_locked:
@@ -1187,8 +1186,6 @@ def main() -> None:
             if ch in ("1", "2", "3", "4"):
                 new_mode = mode_engine.set_mode(int(ch))
                 print(f"\n[SERIAL CMD] >>> Switched to {MODE_NAMES[new_mode]} <<<\n")
-                leds.signal_mode_change(new_mode)
-                led_is_active = False
                 now_after = time.monotonic()
                 last_activity_time = now_after
                 detector.last_click_time = now_after
@@ -1196,8 +1193,6 @@ def main() -> None:
             elif ch in ("m", "M"):
                 new_mode = mode_engine.cycle_mode()
                 print(f"\n[SERIAL CMD] >>> Cycled to {MODE_NAMES[new_mode]} <<<\n")
-                leds.signal_mode_change(new_mode)
-                led_is_active = False
                 now_after = time.monotonic()
                 last_activity_time = now_after
                 detector.last_click_time = now_after

@@ -183,8 +183,15 @@ class ModeEngine:
     def cycle_mode(self) -> MetronomeMode:
         """Cycle to the next mode (1 -> 2 -> 3 -> 4 -> 1)."""
         next_val = (self.current_mode.value % 4) + 1
-        self.current_mode = MetronomeMode(next_val)
-        self.reset_clock()
+        return self.set_mode(MetronomeMode(next_val))
+
+    def set_mode(self, mode: MetronomeMode) -> MetronomeMode:
+        """Set specific mode while preserving flywheel tempo and PLL lock."""
+        if mode != self.current_mode:
+            self.current_mode = mode
+            self._scheduled_flashes.clear()
+            if self.current_mode in (MetronomeMode.METER_4_4, MetronomeMode.METER_3_4):
+                self.beat_count = 0
         return self.current_mode
 
     def _emit_beat(self, beat_time: float) -> list[FlashEvent]:

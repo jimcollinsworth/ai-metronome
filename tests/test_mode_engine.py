@@ -163,6 +163,38 @@ def test_pll_continuous_freewheeling_and_resync_after_sound_pause():
     assert engine.is_locked is True
 
 
+def test_mode_switching_preserves_flywheel_tempo_and_pll_lock():
+    """Verify switching modes while running keeps exact flywheel tempo, stays locked, and switches choreography."""
+    engine = ModeEngine(initial_mode=MetronomeMode.ON_BEAT)
+    # Lock onto 120 BPM (0.5s period)
+    engine.on_click(now=1.0, ioi=0.5)
+    engine.on_click(now=1.5, ioi=0.5)
+    engine.on_click(now=2.0, ioi=0.5)
+    assert engine.is_locked is True
+    assert abs(engine.period - 0.5) < 1e-6
+
+    # Switch to Mode 3 (4/4 Meter) on the fly
+    engine.set_mode(MetronomeMode.METER_4_4)
+    # Lock and tempo MUST be preserved!
+    assert engine.is_locked is True
+    assert abs(engine.period - 0.5) < 1e-6
+
+    # Next beat due on clock at t=2.5s must be Beat 1 in Mode 3 (Green accent downbeat)
+    due_b1 = engine.get_due_flashes(now=2.501)
+    assert len(due_b1) == 1
+    assert due_b1[0].color == "GREEN"
+    assert due_b1[0].beat_num == 1
+    assert due_b1[0].brightness == BRIGHTNESS_FULL
+
+    # Switch to Mode 2 (Upbeat) on the fly
+    engine.cycle_mode()  # Mode 3 -> Mode 4
+    engine.cycle_mode()  # Mode 4 -> Mode 1
+    engine.cycle_mode()  # Mode 1 -> Mode 2
+    assert engine.current_mode == MetronomeMode.UPBEAT
+    assert engine.is_locked is True
+    assert abs(engine.period - 0.5) < 1e-6
+
+
 def test_pll_internal_clock_fires_on_schedule_and_filters_jitter():
     """Verify internal PLL clock dims until locked (3 clicks / 2 intervals), fires on schedule, and filters jitter."""
     engine = ModeEngine(initial_mode=MetronomeMode.ON_BEAT)

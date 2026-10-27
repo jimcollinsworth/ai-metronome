@@ -4,6 +4,29 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-27 — Seamless Mode Switching with Preserved Flywheel Tempo & PLL Lock
+
+> [!NOTE] User Instructions & Guidance:
+> - *"great, and when changing modes, we should continue flywheel coasting at the same speed, just with different led flashing. so we do not reset everything on mode switch"*
+> - *"yes"*
+
+### ADR 015: Zero-Pause Flywheel Mode Switching & Choreography Transition
+- **Context**: When cycling modes (via gesture or serial keys `1`–`4`, `m`), `set_mode()` previously invoked `reset_clock()`, wiping out the locked PLL state, period, and scheduled beat timing. Additionally, `signal_mode_change()` blocked execution with `time.sleep()` for 1.0–1.7s to play a mode blink animation, stalling the audio stream and dropping tempo.
+- **Decision & Implementation**:
+  1. **Tempo & PLL Lock Preservation**:
+     - Updated `CircuitModeEngine.set_mode()` and `ModeEngine.set_mode()` to preserve `self.period` (exact BPM), `self.is_locked = True`, and the upcoming `self.next_beat_time`.
+     - Cleared pending scheduled flashes (`scheduled_flashes.clear()`) from prior modes to prevent upbeat collisions.
+     - For meter modes (Modes 3 & 4), sets `beat_count = 0` so the next due clock beat begins as Beat 1 (Green accent downbeat).
+  2. **Instantaneous Choreography Transition**:
+     - Removed blocking `signal_mode_change()` animations on mode switches during runtime.
+     - The autonomous beat clock continues running with zero timing jitter, and the very next beat instantly lights up with the new mode's LED/NeoPixel choreography.
+  3. **Verification**:
+     - Added unit test `test_mode_switching_preserves_flywheel_tempo_and_pll_lock` in `tests/test_mode_engine.py` (16/16 unit tests passing).
+     - Deployed to device (`CIRCUITPY`) and verified all 6 HIL checks passed in 2.48s.
+     - Verified instantaneous Mode 2 cycling via `xiao-cli monitor`.
+
+---
+
 ## 2026-10-27 — Continuous Freewheeling (Flywheel) Mode & Mode 2 Tuple Unpack Fix
 
 > [!NOTE] User Instructions & Guidance:
