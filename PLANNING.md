@@ -61,6 +61,7 @@ Active backlog and task tracking for `ai-metronome`.
     - [x] Added `uv run xiao-cli python-restore` (aliased `restore`) to restore the `CIRCUITPY` filesystem and automatically deploy `code.py`.
     - [x] Fixed CircuitPython MicroPython-parser syntax errors with adjacent f-strings.
     - [x] Verified full on-device operation via `uv run xiao-cli hil-test`: all 6 hardware checkpoints passed (100% pass) and CJMCU-2812-8 (8-LED NeoPixel stick) verified with startup sweep.
+    - [x] Upgraded `xiao-cli monitor` with interactive real-time unbuffered keyboard input (`1`–`4`, `m`, `s`, `z`, `r`) and tuned gesture detection thresholds for natural hand-shaking and table tapping.
 - [ ] Phase 3 POC: Port click detector, PLL beat clock & mode engine firmware to C++ (`src/xiao_nrf52840_sense/cpp/`)
 - [ ] Phase 4: Optimized Native Firmware (C++ / Rust) with Timbre/Harmonicity Rhythm Locking, Instrument Rejection & Custom-Phrase Voice Input (TFLite Micro / CMSIS-NN):
   - [ ] Multi-cluster rhythm locking via 7D onset fingerprint (4-band $L_2$-normalized timbre, Spectral Flatness, autocorrelation Harmonicity, and `20–35 ms` tail decay): listen first for repeated sounds of the same type across candidate clusters and lock onto the strongest periodic click stream

@@ -738,17 +738,34 @@ def cmd_hil_test(args: argparse.Namespace) -> int:
 
 
 def cmd_monitor(args: argparse.Namespace) -> int:
-    """Stream live USB serial console logs from the XIAO."""
+    """Stream live USB serial console logs from the XIAO and handle interactive keyboard commands."""
     info = discover_device(None, args.port)
     if not info.com_port:
         print("[ERROR] No XIAO serial port detected.")
         return 1
 
-    print(f"[MONITOR] Connected to {info.com_port} (115200 baud). Press Ctrl-C to exit.")
+    print("=" * 65)
+    print(f"  [MONITOR] XIAO nRF52840 Console ({info.com_port} @ 115200 baud)")
+    print("=" * 65)
+    print("  Interactive Key Commands:")
+    print("    [1]..[4] : Set Mode (1: On-Beat, 2: Upbeat, 3: 4/4, 4: 3/4)")
+    print("    [m]      : Cycle to Next Mode")
+    print("    [s]      : Print Status & RAM Diagnostics")
+    print("    [z]      : Test Inactivity Sleep Mode")
+    print("    [r]      : Trigger Soft-Reboot (Reload code.py)")
+    print("    [h]      : Show Key Commands Help")
+    print("    [Ctrl-C] : Exit Monitor")
+    print("=" * 65 + "\n")
+
     if args.send:
-        print(f"[MONITOR] Sending command key: {args.send!r}")
+        print(f"[MONITOR] Sending initial command key: {args.send!r}")
+
+    is_windows = sys.platform == "win32"
+    if is_windows:
+        import msvcrt
+
     try:
-        with serial.Serial(info.com_port, baudrate=115200, timeout=0.1) as ser:
+        with serial.Serial(info.com_port, baudrate=115200, timeout=0.05) as ser:
             ser.dtr = True
             ser.rts = True
             if args.reset:
@@ -756,13 +773,47 @@ def cmd_monitor(args: argparse.Namespace) -> int:
             if args.send:
                 ser.write(args.send.encode("utf-8"))
                 ser.flush()
+
             start = time.monotonic()
             while True:
                 if args.duration > 0 and (time.monotonic() - start) >= args.duration:
                     break
-                raw = ser.readline()
-                if raw:
-                    print(raw.decode("utf-8", errors="replace"), end="", flush=True)
+
+                # 1. Non-blocking keyboard input
+                if is_windows and msvcrt.kbhit():
+                    ch_bytes = msvcrt.getch()
+                    if ch_bytes in (b"\x00", b"\xe0"):
+                        msvcrt.getch()  # consume scan code for arrow/function keys
+                    elif ch_bytes == b"\x03":  # Ctrl-C
+                        raise KeyboardInterrupt
+                    else:
+                        key_char = ch_bytes.decode("utf-8", errors="ignore")
+                        if key_char in ("r", "R"):
+                            print("\n[MONITOR] Dispatched Soft-Reboot (Ctrl-C + Ctrl-D)...", flush=True)
+                            trigger_soft_reboot(ser)
+                        elif key_char in ("h", "H", "?"):
+                            print(
+                                "\n[HELP] 1..4=Mode | m=Cycle | s=Status | z=Sleep | r=Reboot | Ctrl-C=Exit\n",
+                                flush=True,
+                            )
+                        elif key_char:
+                            ser.write(ch_bytes)
+                            ser.flush()
+                            if key_char in ("1", "2", "3", "4", "m", "M", "s", "S", "z", "Z"):
+                                print(f"\n[KEY: '{key_char}'] -> Sent to MCU", flush=True)
+
+                # 2. Non-blocking serial read
+                try:
+                    waiting = ser.in_waiting
+                    if waiting > 0:
+                        raw = ser.read(waiting)
+                        if raw:
+                            print(raw.decode("utf-8", errors="replace"), end="", flush=True)
+                    else:
+                        time.sleep(0.01)
+                except (serial.SerialException, OSError):
+                    time.sleep(0.05)
+
     except KeyboardInterrupt:
         print("\n[MONITOR] Closed.")
     except serial.SerialException as err:

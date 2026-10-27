@@ -4,6 +4,32 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-27 — Interactive CLI Serial Monitor & Gesture Threshold Responsiveness
+
+> [!NOTE] User Instructions & Guidance:
+> - *"i'm trying the monitor, doesn't seem to be acepting key commands, no effect"*
+> - *"the counting is working although hard to get it into the right mode"*
+
+### ADR 013: Interactive Unbuffered Keyboard Forwarding & Shake Gesture Responsiveness Tuning
+- **Context**: In `xiao-cli monitor`, the loop only read incoming MCU bytes via `ser.readline()` and had no keyboard input listener, preventing keystrokes (`1`–`4`, `s`, `z`) from reaching the device. Additionally, if CircuitPython ever stopped at the REPL (`>>> `), it required a soft-reboot signal to re-enter `code.py`. For gestures, `slow_shake_release_g` was set too low (`0.20g`), which caused natural continuous hand-shaking to get stuck in `in_stroke = True` without registering the second shake.
+- **Decision & Implementation**:
+  1. **Interactive Keyboard Input in `tools/xiao_cli.py` (`cmd_monitor`)**:
+     - Added Windows unbuffered single-key input via `msvcrt.kbhit()` and `msvcrt.getch()`, non-blocking with 10ms poll intervals.
+     - Keystrokes `'1'`..`'4'`, `'m'` (cycle mode), `'s'` (status report), and `'z'` (sleep) are immediately transmitted to the MCU with visible local feedback (`[KEY: '1'] -> Sent to MCU`).
+     - Added `'r'` / `'R'` shortcut to trigger a soft-reboot (`Ctrl-C + Ctrl-D`) directly from the monitor console.
+     - Added `'h'` / `'?'` help cheatsheet display.
+     - Changed serial reading from blocking `ser.readline()` to non-blocking `ser.read(ser.in_waiting)` for instant display of partial lines and prompts.
+  2. **Firmware Mode Commands & Gesture Tuning (`src/xiao_nrf52840_sense/circuitpython/code.py`)**:
+     - Added `'m'` / `'M'` serial command to cycle through modes (Mode 1 -> Mode 2 -> Mode 3 -> Mode 4 -> Mode 1) identically to the physical gesture.
+     - Raised `slow_shake_release_g` from `0.20g` to `0.26g`, lowered `slow_shake_dyn_g` from `0.48g` to `0.45g`, and reduced `min_stroke_gap_sec` from `0.15s` to `0.12s`, allowing fluid back-and-forth hand-shaking without trapping `in_stroke`.
+     - Lowered table tap thresholds (`hard_drop_dyn_g = 1.25g`, `hard_drop_jerk_g = 1.35g`, `debounce_sec = 0.8s`) for reliable detection when tapped against a desk.
+  3. **Verification**:
+     - Verified interactive mode switching on hardware: `'m'` successfully cycled to Mode 2, Mode 3, and Mode 4.
+     - Verified all 6 HIL checks passed in 2.48s with CJMCU-2812-8 LED bar operational.
+     - 14/14 Python unit tests and 7/7 Cargo Rust unit tests passing.
+
+---
+
 ## 2026-10-27 — CircuitPython SoftDevice S140 Restoration Package & Syntax Fix for CJMCU-2812-8 LED Bar
 
 > [!NOTE] User Instructions & Guidance:

@@ -383,13 +383,13 @@ class ShakeAndDropDetector:
     def __init__(
         self,
         i2c_bus,
-        hard_drop_dyn_g: float = 1.35,
-        hard_drop_jerk_g: float = 1.45,
-        slow_shake_dyn_g: float = 0.48,
-        slow_shake_release_g: float = 0.20,
-        min_stroke_gap_sec: float = 0.15,
-        shake_window_sec: float = 1.4,
-        debounce_sec: float = 1.0,
+        hard_drop_dyn_g: float = 1.25,
+        hard_drop_jerk_g: float = 1.35,
+        slow_shake_dyn_g: float = 0.45,
+        slow_shake_release_g: float = 0.26,
+        min_stroke_gap_sec: float = 0.12,
+        shake_window_sec: float = 1.5,
+        debounce_sec: float = 0.8,
     ) -> None:
         self.i2c = i2c_bus
         self.hard_drop_dyn_g = hard_drop_dyn_g
@@ -1184,6 +1184,15 @@ def main() -> None:
             if ch in ("1", "2", "3", "4"):
                 new_mode = mode_engine.set_mode(int(ch))
                 print(f"\n[SERIAL CMD] >>> Switched to {MODE_NAMES[new_mode]} <<<\n")
+                leds.signal_mode_change(new_mode)
+                led_is_active = False
+                now_after = time.monotonic()
+                last_activity_time = now_after
+                detector.last_click_time = now_after
+                gesture_detector.last_trigger_time = now_after
+            elif ch in ("m", "M"):
+                new_mode = mode_engine.cycle_mode()
+                print(f"\n[SERIAL CMD] >>> Cycled to {MODE_NAMES[new_mode]} <<<\n")
                 leds.signal_mode_change(new_mode)
                 led_is_active = False
                 now_after = time.monotonic()
