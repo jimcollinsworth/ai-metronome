@@ -54,7 +54,13 @@ Active backlog and task tracking for `ai-metronome`.
   - [x] Bare-metal ARM Cortex-M4F firmware (`main.rs`, `hardware.rs`) with EasyDMA PDM (16 kHz), TWIM (400 kHz), active-low RGB LED retinal pulse dimming, 5.0s watchdog (`NRF_WDT`), retained RAM crash log (`.uninit`), and native USB CDC serial with 1200-baud DFU reset touch.
   - [x] Windows `cmd.exe` toolchain and pure-Python ELF32-to-UF2 packer (`0xADA52840`) in `tools/xiao_cli.py` (`uv run xiao-cli rust-build` and `uv run xiao-cli rust-deploy`).
   - [x] Cross-compilation to `thumbv7em-none-eabihf` verified (`56.0 KB` flash, `4 bytes` static RAM, 219 UF2 blocks, 0 compiler warnings).
-  - [ ] On-device validation of Rust firmware: investigate bootloader app validation / vector table jump from DFU mode.
+  - [x] On-device validation of Rust firmware: verified EasyDMA PDM microphone (span=2849), LSM6DS3TR-C IMU (WHO_AM_I=0x6A, -0.98g), battery rail, CPU thermal, noise floor calibration, and PLL beat clock.
+  - [x] Bare-Metal Rust / CircuitPython Dual-Boot & Recovery Package:
+    - [x] Discovered bare-metal Rust flashing at `0x1000` erases Nordic SoftDevice S140 (`0x1000`–`0x27000`), preventing standard CircuitPython (`0x27000`) from booting.
+    - [x] Generated `build/circuitpython-with-softdevice-xiao-sense.uf2` combining SoftDevice S140 v7.3.0 and CircuitPython 9.2.4 for single-step restoration.
+    - [x] Added `uv run xiao-cli python-restore` (aliased `restore`) to restore the `CIRCUITPY` filesystem and automatically deploy `code.py`.
+    - [x] Fixed CircuitPython MicroPython-parser syntax errors with adjacent f-strings.
+    - [x] Verified full on-device operation via `uv run xiao-cli hil-test`: all 6 hardware checkpoints passed (100% pass) and CJMCU-2812-8 (8-LED NeoPixel stick) verified with startup sweep.
 - [ ] Phase 3 POC: Port click detector, PLL beat clock & mode engine firmware to C++ (`src/xiao_nrf52840_sense/cpp/`)
 - [ ] Phase 4: Optimized Native Firmware (C++ / Rust) with Timbre/Harmonicity Rhythm Locking, Instrument Rejection & Custom-Phrase Voice Input (TFLite Micro / CMSIS-NN):
   - [ ] Multi-cluster rhythm locking via 7D onset fingerprint (4-band $L_2$-normalized timbre, Spectral Flatness, autocorrelation Harmonicity, and `20–35 ms` tail decay): listen first for repeated sounds of the same type across candidate clusters and lock onto the strongest periodic click stream

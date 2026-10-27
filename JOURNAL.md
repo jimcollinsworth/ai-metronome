@@ -4,6 +4,34 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-27 — CircuitPython SoftDevice S140 Restoration Package & Syntax Fix for CJMCU-2812-8 LED Bar
+
+> [!NOTE] User Instructions & Guidance:
+> - *"says it flashs but doesn't load d:, i tried reset. blue light flashing now"*
+> - *"i see flashing red now"*
+> - *"to much searching, lets investigate instead. give me more basic commands to check status, ports, let me try a manual python reset or something."*
+> - *"ok d: working now, i was doing single press instead of double. led is red flashing until i move the device. and the led bar is not working"*
+
+### ADR 012: SoftDevice S140 + CircuitPython Dual-Boot Recovery & MicroPython String Concatenation Fix
+- **Context**: When bare-metal Rust is flashed to `0x1000` via UF2, it replaces Nordic SoftDevice S140 (`0x1000`–`0x27000`), causing `INFO_UF2.TXT` to report `SoftDevice: not found`. Flashing standard CircuitPython UF2 (`0x27000`) without SoftDevice leaves the device unable to boot CircuitPython or mount `CIRCUITPY`. Furthermore, after restoring the filesystem, `code.py` threw a startup `SyntaxError` on MicroPython's parser due to adjacent multi-line f-string literals, preventing initialization of the CJMCU-2812-8 (8-LED NeoPixel stick) on `D0`.
+- **Decision & Implementation**:
+  1. **Combined SoftDevice S140 + CircuitPython UF2 (`build/circuitpython-with-softdevice-xiao-sense.uf2`)**:
+     - Extracted Nordic SoftDevice S140 v7.3.0 (`0x1000`–`0x27000`) from the official bootloader HEX file.
+     - Combined SoftDevice S140 and CircuitPython 9.2.4 into a single UF2 package (`1,500,672` bytes, 2,931 blocks).
+     - Flashing this UF2 restores the SoftDevice header and CircuitPython runtime in one step, restoring `D:\` (`CIRCUITPY`).
+  2. **CircuitPython MicroPython Parser Syntax Fix**:
+     - In CircuitPython's MicroPython-derived parser, adjacent f-strings inside parentheses (`f"..." \n f"..."`) trigger a `SyntaxError: invalid syntax` at compile time.
+     - Replaced all multi-line adjacent f-strings with explicit single-line strings or explicit `+` concatenation in `src/xiao_nrf52840_sense/circuitpython/code.py`.
+  3. **CLI Argument Parser Ergonomics**:
+     - Updated `tools/xiao_cli.py` to use a common parent parser for all subparsers so `--port` and `--drive` can be supplied either before or after subcommands.
+     - Updated `tools/xiao_cli.py` to automatically prefer the combined SoftDevice + CircuitPython UF2 for `python-restore`.
+  4. **Verification**:
+     - Deployed updated `code.py` to `CIRCUITPY` via `uv run xiao-cli python-deploy`.
+     - Ran `uv run xiao-cli hil-test`: All 6 hardware checkpoints passed (100% pass) in 2.44s.
+     - Verified CJMCU-2812-8 (8-LED NeoPixel stick) startup sweep on `board.D0` and real-time beat visualization operational.
+
+---
+
 ## 2026-10-24 — Rust Firmware POC (`v2.6`), Windows CMD Toolchain & ELF32-to-UF2 Packer
 
 > [!NOTE] User Instructions & Guidance:

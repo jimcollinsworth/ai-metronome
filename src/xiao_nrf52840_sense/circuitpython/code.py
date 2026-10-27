@@ -1134,8 +1134,7 @@ def main() -> None:
             )
             beat_info = f"B{mode_engine.beat_count}"
             print(
-                f"[CLICK #{detector.click_count:03d}] "
-                f"Pk:{hp_peak:5d} | {bpm_str} | {lock_str} | {beat_info}"
+                f"[CLICK #{detector.click_count:03d}] Pk:{hp_peak:5d} | {bpm_str} | {lock_str} | {beat_info}"
             )
 
         # 5. Handle LED off timing
@@ -1205,13 +1204,14 @@ def main() -> None:
             elif ch in ("s", "S"):
                 gc.collect()
                 idle_s = time.monotonic() - last_activity_time
-                print(
+                status_msg = (
                     f"[STATUS] {MODE_NAMES[mode_engine.current_mode]} | "
-                    f"Locked:{mode_engine.is_locked} | "
-                    f"BPM:{mode_engine.bpm or 0.0:.1f} | "
-                    f"Idle:{idle_s:.0f}s/{int(IDLE_SLEEP_SEC)}s | "
-                    f"RAM:{gc.mem_free() // 1024}KB"
+                    + f"Locked:{mode_engine.is_locked} | "
+                    + f"BPM:{mode_engine.bpm or 0.0:.1f} | "
+                    + f"Idle:{idle_s:.0f}s/{int(IDLE_SLEEP_SEC)}s | "
+                    + f"RAM:{gc.mem_free() // 1024}KB"
                 )
+                print(status_msg)
 
 
 if __name__ == "__main__":

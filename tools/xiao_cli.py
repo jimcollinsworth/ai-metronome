@@ -38,8 +38,13 @@ DEFAULT_CIRCUITPYTHON_URL = (
     "https://adafruit-circuit-python.s3.amazonaws.com/bin/Seeed_XIAO_nRF52840_Sense/en_US/"
     "adafruit-circuitpython-Seeed_XIAO_nRF52840_Sense-en_US-9.2.4.uf2"
 )
+DEFAULT_CIRCUITPYTHON_WITH_SD_UF2_PATH = (
+    REPO_ROOT / "build" / "circuitpython-with-softdevice-xiao-sense.uf2"
+)
 DEFAULT_CIRCUITPYTHON_UF2_PATH = (
-    REPO_ROOT / "build" / "adafruit-circuitpython-Seeed_XIAO_nRF52840_Sense-en_US-9.2.4.uf2"
+    DEFAULT_CIRCUITPYTHON_WITH_SD_UF2_PATH
+    if DEFAULT_CIRCUITPYTHON_WITH_SD_UF2_PATH.exists()
+    else REPO_ROOT / "build" / "adafruit-circuitpython-Seeed_XIAO_nRF52840_Sense-en_US-9.2.4.uf2"
 )
 
 # UF2 Constants for Nordic nRF52840 (Adafruit UF2 Bootloader)
@@ -775,21 +780,24 @@ def cmd_reset(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--drive", help="Explicit CIRCUITPY or XIAO-SENSE drive path (e.g. D:\\)")
+    common.add_argument("--port", help="Explicit COM port (e.g. COM9)")
+
     parser = argparse.ArgumentParser(
         prog="xiao-cli",
+        parents=[common],
         description="HIL Development & Rust/CircuitPython Test CLI for Seeed Studio XIAO nRF52840 Sense",
     )
-    parser.add_argument("--drive", help="Explicit CIRCUITPY or XIAO-SENSE drive path (e.g. D:\\)")
-    parser.add_argument("--port", help="Explicit COM port (e.g. COM9)")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
     # status
-    sub_status = sub.add_parser("status", help="Detect CIRCUITPY/XIAO-SENSE drive and USB serial port")
+    sub_status = sub.add_parser("status", parents=[common], help="Detect CIRCUITPY/XIAO-SENSE drive and USB serial port")
     sub_status.set_defaults(func=cmd_status)
 
     # python-deploy (CircuitPython)
-    sub_pydeploy = sub.add_parser("python-deploy", aliases=["deploy", "push"], help="Copy code.py to CIRCUITPY drive")
+    sub_pydeploy = sub.add_parser("python-deploy", parents=[common], aliases=["deploy", "push"], help="Copy code.py to CIRCUITPY drive")
     sub_pydeploy.add_argument("--file", default=str(DEFAULT_FIRMWARE_PATH), help="Source Python file to deploy")
     sub_pydeploy.add_argument("--test", action="store_true", help="Run HIL verification immediately after deploy")
     sub_pydeploy.add_argument("--listen-sec", type=float, default=0.0, help="Seconds to listen for clicks/gestures after init")
@@ -798,7 +806,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # python-restore (Restore CircuitPython runtime and CIRCUITPY drive from Rust/DFU)
     sub_pyrestore = sub.add_parser(
-        "python-restore",
+        "python-restore", parents=[common],
         aliases=["restore", "restore-circuitpython"],
         help="Flash official CircuitPython firmware UF2 to restore CIRCUITPY drive and deploy code.py",
     )
@@ -810,13 +818,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub_pyrestore.set_defaults(func=cmd_python_restore)
 
     # rust-build
-    sub_rbuild = sub.add_parser("rust-build", help="Compile Rust firmware and generate UF2 image")
+    sub_rbuild = sub.add_parser("rust-build", parents=[common], help="Compile Rust firmware and generate UF2 image")
     sub_rbuild.add_argument("--manifest", default=str(RUST_MANIFEST_PATH), help="Path to Rust Cargo.toml")
     sub_rbuild.add_argument("--output", default=str(DEFAULT_UF2_OUTPUT_PATH), help="Output UF2 file path")
     sub_rbuild.set_defaults(func=cmd_rust_build)
 
     # rust-deploy
-    sub_rdeploy = sub.add_parser("rust-deploy", help="Build and flash Rust UF2 firmware to XIAO-SENSE")
+    sub_rdeploy = sub.add_parser("rust-deploy", parents=[common], help="Build and flash Rust UF2 firmware to XIAO-SENSE")
     sub_rdeploy.add_argument("--uf2", default=str(DEFAULT_UF2_OUTPUT_PATH), help="UF2 file to flash")
     sub_rdeploy.add_argument("--no-build", action="store_true", help="Skip cargo build if UF2 already exists")
     sub_rdeploy.add_argument("--test", action="store_true", help="Run HIL verification immediately after flashing")
@@ -825,7 +833,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub_rdeploy.set_defaults(func=cmd_rust_deploy)
 
     # hil-test
-    sub_test = sub.add_parser("hil-test", aliases=["test"], help="Run automated on-device HIL verification")
+    sub_test = sub.add_parser("hil-test", parents=[common], aliases=["test"], help="Run automated on-device HIL verification")
     sub_test.add_argument("--deploy", action="store_true", help="Deploy latest code.py before testing")
     sub_test.add_argument("--file", default=str(DEFAULT_FIRMWARE_PATH), help="Source Python file if --deploy is used")
     sub_test.add_argument("--listen-sec", type=float, default=0.0, help="Seconds to listen for live clicks/shakes after init")
@@ -833,14 +841,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub_test.set_defaults(func=cmd_hil_test)
 
     # monitor
-    sub_mon = sub.add_parser("monitor", aliases=["logs"], help="Stream live serial console output")
+    sub_mon = sub.add_parser("monitor", parents=[common], aliases=["logs"], help="Stream live serial console output")
     sub_mon.add_argument("--reset", action="store_true", help="Soft-reset board upon connecting")
     sub_mon.add_argument("--send", help="Send a single debug key upon connecting (e.g. 'd', 'r', '1'..'4', 'z', 'b')")
     sub_mon.add_argument("--duration", type=float, default=0.0, help="Auto-exit after N seconds (0 = continuous)")
     sub_mon.set_defaults(func=cmd_monitor)
 
     # reset
-    sub_rst = sub.add_parser("reset", help="Soft-reboot board over serial and show startup log")
+    sub_rst = sub.add_parser("reset", parents=[common], help="Soft-reboot board over serial and show startup log")
     sub_rst.add_argument("--duration", type=float, default=4.0, help="Seconds to stream startup output")
     sub_rst.set_defaults(func=cmd_reset)
 
