@@ -4,6 +4,109 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-24 — Rust Firmware POC (`v2.6`), Windows CMD Toolchain & ELF32-to-UF2 Packer
+
+> [!NOTE] User Instructions & Guidance:
+> - *"/plan /rus/nrf52840-mcu /xiao-nrf52840-sense ok lets start the rust version. Creat the identical features in rust that we did in python. Research, define the toolchain for compiling deploying testing on device, windows cmd only"*
+> - *"Remove all powershell, explain the toolchain and debug some"*
+> - *"Continue now"*
+> - *"Do we still have the circuit python code, tools and docs? Need to maintain so we can compare"*
+> - *"Change deploy to python-deploy"*
+> - *"device is plugged in, is this working?"*
+> - *"still didn't work, red light is flashing now. lets debug together"*
+> - *"still getting this, and whats the warning can we get rid of that. how do the firmware/usb/com prots/drives differ on this chip between circuit python and rust. red blinking"*
+> - *"we are stumbling and need help, i'm looking for some skills to add. stop this debugging process for now. summarize what we have done, know and don't know, update journal too. i'll come back with further instructions"*
+
+### ADR 009: Embedded Rust Firmware POC (`no_std`) & Windows `cmd.exe` UF2 Toolchain
+- **Context**: The Python CircuitPython v2.6 firmware demonstrated the full feature set (outlier-resistant click detection, PLL beat clock, 4 modes with pre-lock and weak-beat dimming, dual-gesture mode switching, and 30s inactivity sleep/wake). Phase 2 required creating an identical, feature-for-feature implementation in Embedded Rust (`src/xiao_nrf52840_sense/rust/`), with a Windows `cmd.exe`-only toolchain for compilation, UF2 packaging, deployment via the factory Adafruit UF2 bootloader (`0xADA52840`), and multi-layer debugging.
+- **Decision & Implementation**:
+  1. **Platform-Independent `no_std` Core Library (`src/xiao_nrf52840_sense/rust/src/lib.rs`)**:
+     - [`click_detector.rs`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/rust/src/click_detector.rs): First-difference HPF $H(z)=1-z^{-1}$, lower-tertile 25-frame calibration, sub-frame sample-index timestamping ($62.5\,\mu\text{s}$ resolution @ 16 kHz), adaptive EMA noise floor, crest factor ($\ge 1.9$), and attack ratio ($\ge 1.45\times$).
+     - [`mode_engine.rs`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/rust/src/mode_engine.rs): Always starts in Mode 1 (`ON_BEAT`, Red) on reset; Mode 2 (`IN_BETWEEN`, Blue upbeat); Mode 3 (4/4, Bright Green on 1, Dim Red on 2,3,4); Mode 4 (3/4, Bright Green on 1, Dim Red on 2,3); pre-lock dimming (`0.18`) until 2 consistent intervals (3 steady clicks) lock the PLL.
+     - [`gesture.rs`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/rust/src/gesture.rs): `ShakeModeClassifier` supporting either 2 slowish shakes (`dyn >= 0.48g`, release `< 0.20g`) or 1 firm drop/tap to table (`dyn >= 1.35g` or `jerk >= 1.45g`); `SleepWakeController` with 30s inactivity timeout.
+     - [`crash_log.rs`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/rust/src/crash_log.rs): Retained SRAM (`.uninit`) panic recorder that preserves panic file, line, and message across soft/watchdog resets.
+     - **Host Testing**: All 7 unit tests pass natively on Windows (`cargo test --lib --target x86_64-pc-windows-msvc`).
+  2. **Bare-Metal ARM Cortex-M4F Firmware (`main.rs`, `hardware.rs`)**:
+     - Configured for `thumbv7em-none-eabihf` with hardware FPU.
+     - Direct peripheral drivers: `NRF_TIMER0` (1 MHz microsecond monotonic clock), `NRF_CLOCK` (32 MHz HFCLK + internal LFRC), `NRF_WDT` (5.0s watchdog paused in sleep), `NRF_PDM` (16 kHz 16-bit EasyDMA), `NRF_TWIM0` (400 kHz I2C for LSM6DS3TR-C), `NRF_SAADC` (battery voltage divider with sink gate on P0.14), `NRF_TEMP` (die temp), active-low RGB LED with retinal pulse dimming (`12 ms` pre-lock, `15 ms` weak-beat Red, `130 ms` full locked).
+     - Native USB CDC Serial (`USBD`) with 1200-baud touch DFU auto-reset (`NRF_POWER->GPREGRET = 0x57`), interactive serial debug keys (`d`, `r`, `b`, `z`, `1`..`4`), and diagnostic telemetry matching `xiao-cli hil-test`.
+     - Compiler warning cleanup: Removed unused `init_clocks` helper from `hardware.rs`, resulting in zero warnings across the entire build.
+  3. **Linker & Memory Map (`memory.x`)**:
+     - Flash linked at `0x00001000` (length 944 KB), placing the vector table immediately after the Nordic 4 KB MBR.
+     - Overwrites dormant SoftDevice magic header (`0x00002000`) so the factory Adafruit UF2 bootloader boots `0x00001000` directly with `VTOR=0x1000`.
+     - Explicit `SCB->VTOR = 0x00001000` write at the start of `main()`.
+  4. **Windows `cmd.exe` Toolchain in `tools/xiao_cli.py`**:
+     - Pure-Python ELF32-to-UF2 converter (`elf_to_uf2`) packing loadable flash segments into 512-byte blocks with family ID `0xADA52840`.
+     - CLI command `deploy` renamed to `python-deploy` (preserving CircuitPython v2.6 deployment path and documentation in parallel).
+     - `uv run xiao-cli rust-build`: Compiles release binary and generates `build/ai-metronome-rust.uf2` (`56.0 KB`, 219 blocks).
+     - `uv run xiao-cli rust-deploy`: Automatically touches COM port at 1200 baud, discovers `XIAO-SENSE` drive, checks `INFO_UF2.TXT`, flashes the UF2, and waits for serial enumeration.
+     - Added `tests/test_uf2_packer.py` (14/14 Python tests passing).
+
+### On-Device Investigation Status: What We Done, Know, and Don't Know
+
+- **What We Have Done**:
+  1. Built the complete, feature-identical embedded Rust implementation of the AI Metronome (`ai-metronome-rust v2.6.0`).
+  2. Implemented all core DSP, PLL, mode engine, gesture classifier, and crash logging modules with 7/7 native unit tests passing.
+  3. Built hardware drivers for all XIAO Sense peripherals (PDM, IMU TWIM, SAADC, TIMER, WDT, USBD).
+  4. Created a Windows `cmd.exe`-compatible build and deploy CLI pipeline (`rust-build`, `rust-deploy`, `python-deploy`).
+  5. Flashed `ai-metronome-rust.uf2` to the device via the Adafruit UF2 bootloader drive `D:\`.
+  6. Eliminated all compiler warnings (`init_clocks` dead code).
+  7. Preserved all CircuitPython code, tools, and documentation intact for direct comparison.
+
+- **What We Know**:
+  1. **USB Architecture**: The nRF52840 has no dedicated USB-to-UART chip; any USB drive (`XIAO-SENSE`, `CIRCUITPY`) or COM port only exists while software on the chip actively runs a USB stack.
+  2. **Bootloader Behavior**: When the Adafruit UF2 bootloader is in DFU mode, it mounts `XIAO-SENSE` and pulses the onboard Red LED (`P0.26`, active-low).
+  3. **Rejection Symptom**: After `ai-metronome-rust.uf2` is copied to `D:\`, the bootloader reboots back into DFU mode with the Red LED blinking, rather than jumping to the Rust application.
+  4. **Bootloader Info**: The user's device reports `SoftDevice: not found` in `INFO_UF2.TXT` (erased or unpopulated at `0x00001000`–`0x00027000`).
+
+- **What We Don't Know**:
+  1. **Bootloader Validation Failure Reason**: Whether `bootloader_app_is_valid()` in this specific Adafruit bootloader build rejects the app due to:
+     - Vector table offset expectation (is the bootloader hardcoded to require SoftDevice S140 present at `0x00001000` and the application at `0x00027000`? Or does it permit `0x00001000` apps only with a specific DFU settings CRC?).
+     - A missing or corrupt bootloader settings page in upper flash (`0x000FF000`).
+     - An unhandled hardware exception immediately upon jumping to `0x00001000` (e.g. clock initialization or watchdog firing before USB CDC enumerates), triggering an immediate reset back into bootloader mode.
+  2. **Device Baseline State**: Whether restoring the official CircuitPython UF2 or Adafruit SoftDevice bundle will cleanly re-establish the baseline `CIRCUITPY` drive and S140 SoftDevice header.
+
+---
+
+## 2026-10-20 — Meter Color Update (Green on 1, Red on Others), Reset-to-Mode-1, Zero-Allocation DSP & MCU Skills
+
+> [!NOTE] User Instructions & Guidance:
+> - *"on the 4/4 and 3/4 change back to green on first beat and red on the other beats"*
+> - *"yes do those updates. also lets add some project skills file(s) for circuitpython tips, along with links and references. we have some to start with. search for other skills files on the internet for nrf52840, xiao, circuitpython, download and install for project"*
+> - *"not really getting any flashes now, change logic so it doesn't remember mode setting, goes back to mode one on reset"*
+> - *"pretty good now. maybe dim the red led a bit during 3/4 and 4/4 to emphasize the green count. and dim all the leds until the timing is locked in"*
+> - *"now lets add some sleep/wake code, if there is no movement for a while, the cpu goes to sleep until awaken from movement"*
+> - *"for future phase - consider using the actual sound of the clicks and a model to compare to each other, don't rely simply on a large transient."*
+> - *"additional issue to consider later, the sound of the instruments like a piano, must listen only to the click"*
+
+### ADR 008: 4/4 & 3/4 Meter Color Restoration, Reset-to-Mode-1, Zero-Allocation Loop & Project MCU Skills
+- **Context**: Modes 3 (4/4) and 4 (3/4) needed to flash Green on Beat 1 and Red on the remaining beats (instead of silent beats). Furthermore, combining `gc.disable()` with `ulab.numpy` array creation (`np.array`, `np.diff`, `abs`) and `time.monotonic_ns()` at 200 Hz allocated ~800 heap objects/sec and caused heap exhaustion/missed flashes, while a transient sound during boot calibration could bias the baseline noise floor upward. Jim also requested that the device always reset to Mode 1 (`ON_BEAT`) on reset rather than persisting mode state in NVM.
+- **Decision**:
+  1. **4/4 & 3/4 Meter Colors & Hardware PWM Downbeat Emphasis**:
+     - Updated [`ModeEngine`](file:///c:/Users/jimco/Projects/ai-metronome/src/ai_metronome/mode_engine.py) and [`CircuitModeEngine`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/circuitpython/code.py) so Mode 3 (4/4) flashes `GREEN, RED, RED, RED` and Mode 4 (3/4) flashes `GREEN, RED, RED`.
+     - Upgraded `StatusLEDs` in `code.py` (`v2.4`) to drive the active-low RGB LEDs via 2 kHz hardware PWM (`pwmio.PWMOut`) combined with pulse-width scaling:
+       - **Pre-Lock Dimming (`BRIGHTNESS_DIM_UNLOCKED = 0.10`, `60 ms` pulse)**: All LEDs flash dim while acquiring tempo until 2 consecutive consistent beat intervals (3 steady clicks) lock the internal PLL clock.
+       - **Meter Weak-Beat Dimming (`BRIGHTNESS_DIM_METER = 0.12`, `60 ms` pulse)**: In 4/4 and 3/4 modes, Red weak beats (2..N) are dimmed to 12% duty / 60 ms while Beat 1 Green flashes at 100% duty / 130 ms (`BRIGHTNESS_FULL = 1.0`) to strongly emphasize the downbeat count.
+  2. **Always Reset to Mode 1**: Removed `microcontroller.nvm` mode persistence so the board always boots into Mode 1 (`ON_BEAT`, Red) on reset.
+  3. **Zero-Allocation High-Pass Loop & Outlier-Resistant Calibration (`v2.3`)**:
+     - Replaced `gc.disable()` + `ulab.numpy` per-frame heap allocations with the zero-allocation small-integer loop over the 80-sample `array("H")` DMA buffer and standard `time.monotonic()`, eliminating heap churn completely.
+     - Hardened `PDMClickDetector.finalize_calibration()` using lower-tertile sorting and clamping (`noise_floor_peak <= 180.0`, `noise_floor_mean <= 80.0`) so any noise during startup calibration cannot blind click detection.
+     - Retained non-blocking USB Serial command support (`supervisor.runtime.serial_bytes_available` for keys `'1'`..`'4'`, `'s'`, and `'z'` to test sleep).
+  4. **Low-Power Motion Sleep / Wake (`v2.5`)**:
+     - Added [`SleepWakeController`](file:///c:/Users/jimco/Projects/ai-metronome/src/ai_metronome/mode_engine.py#L351-L391) and hardware [`sleep_until_movement`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/circuitpython/code.py#L890-L947):
+       - When no movement (`dyn < 0.08g`, `jerk < 0.08g`) and no locked metronome beats occur for `IDLE_SLEEP_SEC = 30.0` seconds, the board fades the Blue LED down to OFF, stops the 16 kHz PDM DMA stream (`mic.deinit()`), and gates off the microphone power rail (`board.MIC_PWR = False`).
+       - Switches the LSM6DS3TR-C accelerometer from `416 Hz` (`0x68`) down to `26 Hz` low-power ODR (`CTRL1_XL = 0x28`) and routes the hardware Wake-Up interrupt (`WAKE_UP_THS = 0x02`) to `board.IMU_INT1` (`MD1_CFG = 0x20`).
+       - Enters tickless WFI CPU sleep until `board.IMU_INT1` asserts or accelerometer movement (`>= 0.12g`) is detected, then restores `416 Hz` IMU ODR, powers up `board.MIC_PWR = True`, re-initializes `PDMIn`, and blinks 2 Green pulses to confirm wake-up without falsely triggering a mode switch.
+  5. **Installed Project Agent Skills (`.agents/skills/`)**:
+     - `circuitpython-tricks`: Real-time CircuitPython tips, zero-allocation loops, `ulab.numpy` gotchas, non-blocking USB serial, and full `todbot/circuitpython-tricks` reference.
+     - `xiao-nrf52840-sense`: Hardware pinout, power gates (`MIC_PWR`, `IMU_PWR`, `READ_BATT_ENABLE`), PDM DMA, LSM6DS3TR-C registers, and Seeed Studio `xiao-assistant` references (CircuitPython, Arduino, TFLite Micro, PlatformIO, Zephyr).
+     - `nrf52840-mcu`: Nordic nRF52840 architecture, SoftDevice S140 memory map, UF2 bootloader, and recipes from `alexex1993/mcu-skills`.
+  6. **Phase 4 Roadmap — Multi-Cluster Timbre/Harmonicity Rhythm Locking, Piano Rejection & Custom-Phrase Voice Input**:
+     - Designed a 7D onset fingerprint (4-band $L_2$-normalized timbre, Spectral Flatness, autocorrelation Harmonicity, and `20–35 ms` post-onset tail decay) with parallel 4-cluster acquisition: listens first for repeated sounds of the same type and locks the PLL onto the strongest periodic percussive stream while rejecting piano/instrument notes.
+     - Recorded the decision to use **custom spoken phrases** (e.g., *"on beat"*, *"upbeat"*, *"four four"*, *"three four"*, *"sleep"*) for the Stage 4 native C++ TFLite Micro + CMSIS-NN keyword spotting pipeline.
+
+---
+
 ## 2026-10-20 — Autonomous Phase-Locked Loop (PLL) Beat Clock, Sensitivity Tuning & TFLite Micro Roadmap
 
 > [!NOTE] User Instructions & Guidance:

@@ -1,0 +1,286 @@
+- id: i2c-scanner-arduino
+  title: I2C Scanner
+  description: Scan the I2C bus and list all connected devices
+  language: arduino
+  boards:
+  - esp32c3
+  - esp32s3
+  - esp32s3-sense
+  - esp32c6
+  - rp2040
+  - rp2350
+  - nrf52840
+  - nrf52840-sense
+  - samd21
+  - ra4m1
+  - mg24
+  - mg24-sense
+  category: sensors
+  tags:
+  - i2c
+  - scanner
+  - wire
+  - bus
+  - debug
+  - address
+  code: "// I2C Scanner - XIAO Boards\n#include <Wire.h>\n\nvoid setup() {\n  Serial.begin(115200);\n  while (!Serial) { delay(10); }\n  Serial.println(\"\\nI2C Scanner\");\n\n  Wire.begin();\n}\n\nvoid\
+    \ loop() {\n  Serial.println(\"Scanning...\");\n\n  int deviceCount = 0;\n  for (byte address = 1; address < 127; address++) {\n    Wire.beginTransmission(address);\n    byte error = Wire.endTransmission();\n\
+    \n    if (error == 0) {\n      Serial.print(\"Device found at 0x\"); Serial.print(address, HEX); Serial.println();\n      deviceCount++;\n    }\n  }\n\n  if (deviceCount == 0) {\n    Serial.println(\"\
+    No I2C devices found!\");\n  } else {\n    Serial.print(\"Found \"); Serial.print(deviceCount); Serial.println(\" device(s)\");\n  }\n\n  delay(5000);\n}\n"
+  requirements: []
+  wikiUrl: https://wiki.seeedstudio.com/SeeedStudio_XIAO_Series_Introduction/
+- id: dht11-arduino
+  title: DHT11 Temperature & Humidity
+  description: Read temperature and humidity from a DHT11 sensor
+  language: arduino
+  boards:
+  - esp32c3
+  - esp32s3
+  - esp32s3-sense
+  - esp32c6
+  - rp2040
+  - rp2350
+  - nrf52840
+  - nrf52840-sense
+  - samd21
+  - ra4m1
+  - mg24
+  - mg24-sense
+  category: sensors
+  tags:
+  - temperature
+  - humidity
+  - dht11
+  - climate
+  - sensor
+  code: "// DHT11 Temperature & Humidity Sensor - XIAO\n#include <DHT.h>\n\n#define DHTPIN 2      // Connect DHT11 data pin to XIAO pin 2\n#define DHTTYPE DHT11\n\nDHT dht(DHTPIN, DHTTYPE);\n\nvoid setup()\
+    \ {\n  Serial.begin(115200);\n  while (!Serial) { delay(10); }\n  Serial.println(\"DHT11 Sensor Reading\");\n  dht.begin();\n}\n\nvoid loop() {\n  delay(2000);  // DHT11 needs at least 1 second between\
+    \ readings\n\n  float humidity = dht.readHumidity();\n  float temperature = dht.readTemperature();\n\n  if (isnan(humidity) || isnan(temperature)) {\n    Serial.println(\"Failed to read from DHT sensor!\"\
+    );\n    return;\n  }\n\n  float heatIndex = dht.computeHeatIndex(temperature, humidity, false);\n\n  Serial.print(\"Temperature: \"); Serial.print(temperature, 1); Serial.println(\" °C\"); Serial.print(\"\
+    Humidity: \"); Serial.print(humidity, 1); Serial.print(\" \"); Serial.print(\"%\"); Serial.println(); \n  Serial.print(\"Heat Index: \"); Serial.print(heatIndex, 1); Serial.println(\" °C\"); Serial.println(\"\
+    ---\");\n}\n"
+  requirements:
+  - DHT sensor library
+  wikiUrl: https://wiki.seeedstudio.com/Grove-Temperature-Humidity-Sensor-DHT11/
+- id: imu-arduino
+  title: IMU Sensor (LSM6DS3TR-C)
+  description: Read accelerometer and gyroscope data from the onboard IMU on XIAO Sense boards
+  language: arduino
+  boards:
+  - nrf52840-sense
+  - esp32s3-sense
+  - mg24-sense
+  category: sensors
+  tags:
+  - imu
+  - accelerometer
+  - gyroscope
+  - lsm6ds3
+  - motion
+  - sense
+  code: "// IMU Sensor - XIAO nRF52840 Sense (LSM6DS3TR-C)\n#include <Adafruit_LSM6DS3TRC.h>\n\nAdafruit_LSM6DS3TRC lsm6ds3;\n\nvoid setup() {\n  Serial.begin(115200);\n  while (!Serial) { delay(10); }\n\
+    \n  if (!lsm6ds3.begin_I2C()) {\n    Serial.println(\"Failed to find LSM6DS3TR-C chip\");\n    while (1) { delay(10); }\n  }\n\n  Serial.println(\"LSM6DS3TR-C Found!\");\n  lsm6ds3.setAccelRange(LSM6DS3_ACCEL_RANGE_2_G);\n\
+    \  lsm6ds3.setGyroRange(LSM6DS3_GYRO_RANGE_250_DPS);\n}\n\nvoid loop() {\n  sensors_event_t accel, gyro, temp;\n  lsm6ds3.getEvent(&accel, &gyro, &temp);\n\n  Serial.print(\"Accel X: \"); Serial.print(accel.acceleration.x,\
+    \ 2); Serial.print(\", Y: \"); Serial.print(accel.acceleration.y, 2); Serial.print(\", Z: \"); Serial.print(accel.acceleration.z, 2); Serial.println(\" m/s^2\"); Serial.print(\"Gyro X: \"); Serial.print(gyro.gyro.x,\
+    \ 2); Serial.print(\", Y: \"); Serial.print(gyro.gyro.y, 2); Serial.print(\", Z: \"); Serial.print(gyro.gyro.z, 2); Serial.println(\" rad/s\"); Serial.print(\"Temp: \"); Serial.print(temp.temperature,\
+    \ 1); Serial.println(\" °C\"); Serial.println(\"---\");\n  delay(100);\n}\n"
+  requirements:
+  - Adafruit LSM6DS3TR-C
+  wikiUrl: https://wiki.seeedstudio.com/XIAO-BLE-Sense-Getting-Started/
+- id: bme280-arduino
+  title: BME280 Environmental Sensor
+  description: Read temperature, humidity, and pressure from a BME280 sensor via I2C
+  language: arduino
+  boards:
+  - esp32c3
+  - esp32s3
+  - esp32s3-sense
+  - esp32c6
+  - rp2040
+  - rp2350
+  - nrf52840
+  - nrf52840-sense
+  - samd21
+  - ra4m1
+  - mg24
+  - mg24-sense
+  category: sensors
+  tags:
+  - temperature
+  - humidity
+  - pressure
+  - bme280
+  - i2c
+  - environment
+  - weather
+  code: "// BME280 Environmental Sensor - XIAO\n#include <Wire.h>\n#include <Adafruit_BME280.h>\n\nAdafruit_BME280 bme;\n\nvoid setup() {\n  Serial.begin(115200);\n  while (!Serial) { delay(10); }\n\n \
+    \ if (!bme.begin(0x76)) {\n    Serial.println(\"Could not find BME280 sensor at 0x76, trying 0x77...\");\n    if (!bme.begin(0x77)) {\n      Serial.println(\"BME280 not found! Check wiring.\");\n  \
+    \    while (1) { delay(10); }\n    }\n  }\n\n  Serial.println(\"BME280 sensor initialized\");\n}\n\nvoid loop() {\n  Serial.print(\"Temperature: \"); Serial.print(bme.readTemperature(), 2);  Serial.println(\"\
+    \ °C\"); Serial.print(\"Humidity: \"); Serial.print(bme.readHumidity(), 2);  Serial.print(\" \"); Serial.print(\"%\"); Serial.println(); \n  Serial.print(\"Pressure: \"); Serial.print(bme.readPressure()\
+    \ / 100.0F, 2);  Serial.println(\" hPa\"); Serial.print(\"Altitude: \"); Serial.print(bme.readAltitude(1013.25), 2);  Serial.println(\" m\"); Serial.println(\"---\");\n  delay(2000);\n}\n"
+  requirements:
+  - Adafruit BME280 Library
+  - Adafruit Unified Sensor
+  wikiUrl: https://wiki.seeedstudio.com/Grove-Barometer-Sensor-BME280/
+- id: aht20-arduino
+  title: AHT20 Temperature & Humidity
+  description: Read temperature and humidity from an AHT20 sensor via I2C
+  language: arduino
+  boards:
+  - esp32c3
+  - esp32s3
+  - esp32s3-sense
+  - esp32c6
+  - rp2040
+  - rp2350
+  - nrf52840
+  - nrf52840-sense
+  - samd21
+  - ra4m1
+  - mg24
+  - mg24-sense
+  category: sensors
+  tags:
+  - temperature
+  - humidity
+  - aht20
+  - i2c
+  - climate
+  - sensor
+  code: "// AHT20 Temperature & Humidity Sensor - XIAO\n#include <Wire.h>\n#include <Adafruit_AHTX0.h>\n\nAdafruit_AHTX0 aht;\n\nvoid setup() {\n  Serial.begin(115200);\n  while (!Serial) { delay(10); }\n\
+    \n  if (!aht.begin()) {\n    Serial.println(\"Could not find AHT20 sensor! Check wiring.\");\n    while (1) { delay(10); }\n  }\n\n  Serial.println(\"AHT20 sensor initialized\");\n}\n\nvoid loop() {\n\
+    \  sensors_event_t humidity, temp;\n  aht.getEvent(&humidity, &temp);\n\n  Serial.print(\"Temperature: \"); Serial.print(temp.temperature, 2); Serial.println(\" °C\"); Serial.print(\"Humidity: \");\
+    \ Serial.print(humidity.relative_humidity, 2); Serial.print(\" \"); Serial.print(\"%\"); Serial.println(); \n  Serial.println(\"---\");\n  delay(2000);\n}\n"
+  requirements:
+  - Adafruit AHTX0
+  wikiUrl: https://wiki.seeedstudio.com/Grove-AHT20-I2C-Industrial-Grade-Temperature&Humidity-Sensor/
+- id: ultrasonic-hcsr04-arduino
+  title: Ultrasonic Distance (HC-SR04)
+  description: Measure distance using an HC-SR04 ultrasonic sensor
+  language: arduino
+  boards:
+  - esp32c3
+  - esp32s3
+  - esp32s3-sense
+  - esp32c6
+  - rp2040
+  - rp2350
+  - nrf52840
+  - nrf52840-sense
+  - samd21
+  - ra4m1
+  - mg24
+  - mg24-sense
+  category: sensors
+  tags:
+  - ultrasonic
+  - distance
+  - hcsr04
+  - sonar
+  - range
+  - proximity
+  code: "// Ultrasonic Distance Sensor (HC-SR04) - XIAO\n#define TRIG_PIN 2\n#define ECHO_PIN 3\n\nvoid setup() {\n  Serial.begin(115200);\n  while (!Serial) { delay(10); }\n  pinMode(TRIG_PIN, OUTPUT);\n\
+    \  pinMode(ECHO_PIN, INPUT);\n  Serial.println(\"HC-SR04 Ultrasonic Distance Sensor\");\n}\n\nvoid loop() {\n  // Send trigger pulse\n  digitalWrite(TRIG_PIN, LOW);\n  delayMicroseconds(2);\n  digitalWrite(TRIG_PIN,\
+    \ HIGH);\n  delayMicroseconds(10);\n  digitalWrite(TRIG_PIN, LOW);\n\n  // Measure echo duration\n  long duration = pulseIn(ECHO_PIN, HIGH, 30000);\n\n  if (duration == 0) {\n    Serial.println(\"Out\
+    \ of range\");\n  } else {\n    // Calculate distance in cm (speed of sound = 343 m/s)\n    float distanceCm = duration * 0.0343 / 2.0;\n    Serial.print(\"Distance: \"); Serial.print(distanceCm, 1);\
+    \ Serial.println(\" cm\");\n  }\n\n  delay(200);\n}\n"
+  requirements: []
+  wikiUrl: https://wiki.seeedstudio.com/Grove-Ultrasonic_Ranger/
+- id: soil-moisture-arduino
+  title: Soil Moisture Sensor
+  description: Read soil moisture level from an analog soil moisture sensor
+  language: arduino
+  boards:
+  - esp32c3
+  - esp32s3
+  - esp32s3-sense
+  - esp32c6
+  - rp2040
+  - rp2350
+  - nrf52840
+  - nrf52840-sense
+  - samd21
+  - ra4m1
+  - mg24
+  - mg24-sense
+  category: sensors
+  tags:
+  - soil
+  - moisture
+  - analog
+  - agriculture
+  - gardening
+  - water
+  code: "// Soil Moisture Sensor - XIAO\n// Connect sensor analog output to A0\n\n#define SENSOR_PIN A0\n#define DRY_VALUE 3200    // ADC reading when completely dry\n#define WET_VALUE 1400    // ADC reading\
+    \ when submerged in water\n\nvoid setup() {\n  Serial.begin(115200);\n  while (!Serial) { delay(10); }\n  Serial.println(\"Soil Moisture Sensor Example\");\n}\n\nvoid loop() {\n  int rawValue = analogRead(SENSOR_PIN);\n\
+    \n  // Map to percentage (0% = dry, 100% = wet)\n  int moisturePercent = map(rawValue, DRY_VALUE, WET_VALUE, 0, 100);\n  moisturePercent = constrain(moisturePercent, 0, 100);\n\n  Serial.print(\"Raw\
+    \ ADC: \"); Serial.print(rawValue); Serial.print(\" | Moisture: \"); Serial.print(moisturePercent); Serial.print(\"%\"); Serial.println();\n\n  if (moisturePercent < 30) {\n    Serial.println(\"Soil\
+    \ is dry - needs watering!\");\n  } else if (moisturePercent > 70) {\n    Serial.println(\"Soil is very wet\");\n  } else {\n    Serial.println(\"Soil moisture is good\");\n  }\n\n  Serial.println(\"\
+    ---\");\n  delay(2000);\n}\n"
+  requirements: []
+  wikiUrl: https://wiki.seeedstudio.com/Grove-Capacitive-Moisture-Sensor-Corrosion-Resistant/
+- id: light-ldr-arduino
+  title: Light Sensor (LDR)
+  description: Read ambient light level using a light-dependent resistor
+  language: arduino
+  boards:
+  - esp32c3
+  - esp32s3
+  - esp32s3-sense
+  - esp32c6
+  - rp2040
+  - rp2350
+  - nrf52840
+  - nrf52840-sense
+  - samd21
+  - ra4m1
+  - mg24
+  - mg24-sense
+  category: sensors
+  tags:
+  - light
+  - ldr
+  - photoresistor
+  - analog
+  - brightness
+  - ambient
+  code: "// Light Sensor (LDR) - XIAO\n// Connect LDR with a voltage divider to A0\n\n#define LDR_PIN A0\n\nvoid setup() {\n  Serial.begin(115200);\n  while (!Serial) { delay(10); }\n  Serial.println(\"\
+    LDR Light Sensor Example\");\n  Serial.println(\"Higher value = more light\");\n}\n\nvoid loop() {\n  int rawValue = analogRead(LDR_PIN);\n\n  // Approximate lux mapping (varies with resistor and LDR)\n\
+    \  // Using a simple linear approximation for demonstration\n  float voltage = rawValue * (3.3 / 4095.0);\n  int lightPercent = map(rawValue, 0, 4095, 0, 100);\n\n  Serial.print(\"Raw: \"); Serial.print(rawValue);\
+    \ Serial.print(\" | Voltage: \"); Serial.print(voltage, 2); Serial.print(\" V | Light: \"); Serial.print(lightPercent); Serial.print(\"%\"); Serial.println();\n\n  if (lightPercent < 20) {\n    Serial.println(\"\
+    Environment: Dark\");\n  } else if (lightPercent < 60) {\n    Serial.println(\"Environment: Indoor / Dim\");\n  } else {\n    Serial.println(\"Environment: Bright / Outdoor\");\n  }\n\n  Serial.println(\"\
+    ---\");\n  delay(1000);\n}\n"
+  requirements: []
+  wikiUrl: https://wiki.seeedstudio.com/Grove-Light_Sensor/
+- id: pir-motion-arduino
+  title: PIR Motion Sensor
+  description: Detect motion using a PIR (passive infrared) motion sensor
+  language: arduino
+  boards:
+  - esp32s3
+  - esp32s3-sense
+  - esp32c6
+  - rp2040
+  - rp2350
+  - nrf52840
+  - nrf52840-sense
+  - samd21
+  - ra4m1
+  - mg24
+  - mg24-sense
+  category: sensors
+  tags:
+  - pir
+  - motion
+  - infrared
+  - detection
+  - security
+  - presence
+  code: "// PIR Motion Sensor - XIAO\n// Connect PIR output to digital pin D0\n\n#define PIR_PIN 0\n#define LED_PIN LED_BUILTIN\n\nvolatile bool motionDetected = false;\n\n// Note: on ESP32 you can mark\
+    \ this IRAM_ATTR; the macro is ESP32-only\n// and breaks the build on SAMD/RP2040/nRF/MG24 cores.\nvoid motionISR() {\n  motionDetected = true;\n}\n\nvoid setup() {\n  Serial.begin(115200);\n  while\
+    \ (!Serial) { delay(10); }\n\n  pinMode(PIR_PIN, INPUT);\n  pinMode(LED_PIN, OUTPUT);\n  digitalWrite(LED_PIN, LOW);\n\n  // PIR sensor needs ~30 seconds to calibrate after power on\n  Serial.println(\"\
+    PIR sensor calibrating (30s)...\");\n  delay(30000);\n  Serial.println(\"PIR sensor ready!\");\n\n  attachInterrupt(digitalPinToInterrupt(PIR_PIN), motionISR, RISING);\n}\n\nvoid loop() {\n  if (motionDetected)\
+    \ {\n    Serial.println(\"Motion detected!\");\n    digitalWrite(LED_PIN, HIGH);\n    delay(2000);\n    digitalWrite(LED_PIN, LOW);\n    motionDetected = false;\n    Serial.println(\"Armed again\");\n\
+    \  }\n}\n"
+  requirements: []
+  wikiUrl: https://wiki.seeedstudio.com/Grove-PIR_Motion_Sensor/

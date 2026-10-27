@@ -1,9 +1,13 @@
 """Unit tests for AI Metronome visual mode engine, PLL beat clock, and gesture detector."""
 
 from ai_metronome.mode_engine import (
+    BRIGHTNESS_DIM_METER,
+    BRIGHTNESS_DIM_UNLOCKED,
+    BRIGHTNESS_FULL,
     GestureDetector,
     MetronomeMode,
     ModeEngine,
+    SleepWakeController,
 )
 
 
@@ -43,58 +47,79 @@ def test_mode_2_upbeat_flashes_halfway_between_clicks():
     assert pending_due[0].target_time == 10.25
 
 
-def test_mode_3_meter_4_4_green_on_1_silent_on_others():
-    """Mode 3: 4/4 meter — Green on beat 1, NO LED on beats 2, 3, 4."""
+def test_mode_3_meter_4_4_green_on_1_red_on_others():
+    """Mode 3: 4/4 meter — Green on beat 1, Red on beats 2, 3, 4 (dimmed until locked, then bright Green / dim Red)."""
     engine = ModeEngine(initial_mode=MetronomeMode.METER_4_4)
 
-    # Beat 1: Green
+    # Beat 1 (unlocked): Dimmed Green
     b1 = engine.on_click(now=1.0, ioi=0.5)
     assert len(b1) == 1
     assert b1[0].color == "GREEN"
     assert b1[0].beat_num == 1
+    assert b1[0].brightness == BRIGHTNESS_DIM_UNLOCKED
 
-    # Beat 2: Silent
+    # Beat 2 (unlocked, 1st interval): Dimmed Red
     b2 = engine.on_click(now=1.5, ioi=0.5)
-    assert len(b2) == 0
+    assert len(b2) == 1
+    assert b2[0].color == "RED"
+    assert b2[0].beat_num == 2
+    assert b2[0].brightness == BRIGHTNESS_DIM_UNLOCKED
 
-    # Beat 3: Silent
+    # Beat 3 (2nd consistent interval -> LOCKED!): Dimmed Red for weak beat
     b3 = engine.on_click(now=2.0, ioi=0.5)
-    assert len(b3) == 0
+    assert engine.is_locked is True
+    assert len(b3) == 1
+    assert b3[0].color == "RED"
+    assert b3[0].beat_num == 3
+    assert b3[0].brightness == BRIGHTNESS_DIM_METER
 
-    # Beat 4: Silent
+    # Beat 4 (locked): Dimmed Red for weak beat
     b4 = engine.on_click(now=2.5, ioi=0.5)
-    assert len(b4) == 0
+    assert len(b4) == 1
+    assert b4[0].color == "RED"
+    assert b4[0].beat_num == 4
+    assert b4[0].brightness == BRIGHTNESS_DIM_METER
 
-    # Beat 1 (next measure): Green
+    # Beat 1 (next measure, locked): FULL BRIGHT Green to emphasize downbeat!
     b1_next = engine.on_click(now=3.0, ioi=0.5)
     assert len(b1_next) == 1
     assert b1_next[0].color == "GREEN"
     assert b1_next[0].beat_num == 1
+    assert b1_next[0].brightness == BRIGHTNESS_FULL
 
 
-def test_mode_4_meter_3_4_green_on_1_silent_on_others():
-    """Mode 4: 3/4 meter — Green on beat 1, NO LED on beats 2, 3."""
+def test_mode_4_meter_3_4_green_on_1_red_on_others():
+    """Mode 4: 3/4 meter — Green on beat 1, Red on beats 2, 3 (dimmed until locked, then bright Green / dim Red)."""
     engine = ModeEngine(initial_mode=MetronomeMode.METER_3_4)
 
-    # Beat 1: Green
+    # Beat 1 (unlocked): Dimmed Green
     b1 = engine.on_click(now=1.0, ioi=0.5)
     assert len(b1) == 1
     assert b1[0].color == "GREEN"
     assert b1[0].beat_num == 1
+    assert b1[0].brightness == BRIGHTNESS_DIM_UNLOCKED
 
-    # Beat 2: Silent
+    # Beat 2 (unlocked): Dimmed Red
     b2 = engine.on_click(now=1.5, ioi=0.5)
-    assert len(b2) == 0
+    assert len(b2) == 1
+    assert b2[0].color == "RED"
+    assert b2[0].beat_num == 2
+    assert b2[0].brightness == BRIGHTNESS_DIM_UNLOCKED
 
-    # Beat 3: Silent
+    # Beat 3 (locked): Dimmed Red for weak beat
     b3 = engine.on_click(now=2.0, ioi=0.5)
-    assert len(b3) == 0
+    assert engine.is_locked is True
+    assert len(b3) == 1
+    assert b3[0].color == "RED"
+    assert b3[0].beat_num == 3
+    assert b3[0].brightness == BRIGHTNESS_DIM_METER
 
-    # Beat 1 (next measure): Green
+    # Beat 1 (next measure, locked): FULL BRIGHT Green!
     b1_next = engine.on_click(now=2.5, ioi=0.5)
     assert len(b1_next) == 1
     assert b1_next[0].color == "GREEN"
     assert b1_next[0].beat_num == 1
+    assert b1_next[0].brightness == BRIGHTNESS_FULL
 
 
 def test_meter_resets_beat_count_after_pause():
@@ -111,24 +136,33 @@ def test_meter_resets_beat_count_after_pause():
 
 
 def test_pll_internal_clock_fires_on_schedule_and_filters_jitter():
-    """Verify internal PLL clock fires autonomously on time and avoids double-flashing when late click arrives."""
+    """Verify internal PLL clock dims until locked (3 clicks / 2 intervals), fires on schedule, and filters jitter."""
     engine = ModeEngine(initial_mode=MetronomeMode.ON_BEAT)
 
-    # Click 1 at t=1.000s, Click 2 at t=1.500s -> locks PLL at period=0.500s (120 BPM)
-    assert len(engine.on_click(now=1.000)) == 1
-    assert len(engine.on_click(now=1.500)) == 1
+    # Click 1 at t=1.000s, Click 2 at t=1.500s -> still unlocked (dimmed), Click 3 at t=2.000s -> locks PLL (full bright)
+    f1 = engine.on_click(now=1.000)
+    assert len(f1) == 1 and f1[0].brightness == BRIGHTNESS_DIM_UNLOCKED
+    assert engine.is_locked is False
+
+    f2 = engine.on_click(now=1.500)
+    assert len(f2) == 1 and f2[0].brightness == BRIGHTNESS_DIM_UNLOCKED
+    assert engine.is_locked is False
+
+    f3 = engine.on_click(now=2.000)
+    assert len(f3) == 1 and f3[0].brightness == BRIGHTNESS_FULL
     assert engine.is_locked is True
     assert abs(engine.period - 0.500) < 1e-6
 
-    # Beat 3 is due at t=2.000s on the internal clock BEFORE the delayed click recognition at t=2.018s
-    auto_flashes = engine.get_due_flashes(now=2.001)
+    # Beat 4 is due at t=2.500s on the internal clock BEFORE the delayed click recognition at t=2.518s
+    auto_flashes = engine.get_due_flashes(now=2.501)
     assert len(auto_flashes) == 1
     assert auto_flashes[0].color == "RED"
-    assert abs(auto_flashes[0].target_time - 2.000) < 1e-6
+    assert auto_flashes[0].brightness == BRIGHTNESS_FULL
+    assert abs(auto_flashes[0].target_time - 2.500) < 1e-6
 
-    # Now the delayed click recognition arrives 18ms late at t=2.018s:
+    # Now the delayed click recognition arrives 18ms late at t=2.518s:
     # Should NOT double-flash, and should gently nudge phase & period rather than jumping +18ms
-    late_click_flashes = engine.on_click(now=2.018)
+    late_click_flashes = engine.on_click(now=2.518)
     assert len(late_click_flashes) == 0
     # Period should only shift by freq_gain * 0.018 (~4ms), staying very close to 0.504s
     assert 0.500 < engine.period < 0.506
@@ -156,3 +190,29 @@ def test_gesture_backed_off_sensitivity_ignores_minor_bumps_and_triggers_deliber
     triggered_drop, kind_drop = gd.update(0.0, 0.0, 2.45, now=3.55)
     assert triggered_drop is True
     assert kind_drop == "HARD_DROP"
+
+
+def test_sleep_wake_controller_sleeps_on_inactivity_and_wakes_on_movement():
+    """Verify device enters sleep after idle timeout and wakes when movement or INT1 occurs."""
+    swc = SleepWakeController(idle_timeout_sec=30.0, motion_keepawake_g=0.08, wake_motion_g=0.12)
+
+    # Initial check at t=10.0s initializes activity timestamp
+    assert swc.check_motion_and_should_sleep(0.01, 0.01, now=10.0) is False
+    assert swc.is_sleeping is False
+
+    # Movement or click at t=25.0s keeps device awake
+    swc.record_activity(now=25.0)
+    assert swc.check_motion_and_should_sleep(0.01, 0.01, now=45.0) is False
+
+    # Still stationary at t=55.5s (30.5s since last activity at 25.0s) -> enters sleep
+    assert swc.check_motion_and_should_sleep(0.01, 0.01, now=55.5) is True
+    assert swc.is_sleeping is True
+
+    # Tiny sensor noise while sleeping does NOT wake
+    assert swc.check_should_wake(0.02, 0.01, now=60.0) is False
+    assert swc.is_sleeping is True
+
+    # Picking up / nudging the board (dyn=0.18g >= 0.12g) wakes it up immediately
+    assert swc.check_should_wake(0.18, 0.15, now=62.0) is True
+    assert swc.is_sleeping is False
+    assert swc.last_activity_time == 62.0

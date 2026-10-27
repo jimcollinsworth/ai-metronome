@@ -1,0 +1,32 @@
+[package]
+name = "ai-metronome-rust"
+version = "2.6.0"
+edition = "2021"
+description = "AI Metronome v2.6 Rust Firmware for Seeed Studio XIAO nRF52840 Sense"
+
+[lib]
+name = "ai_metronome_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ai-metronome-rust"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libm = "0.2.8"
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.3"
+nrf52840-hal = "0.18.0"
+usb-device = "0.3.2"
+usbd-serial = "0.2.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = true
+panic = "abort"

@@ -34,13 +34,48 @@ ai-metronome/
 
 ## XIAO nRF52840 Sense — CircuitPython POC (`v1`)
 
-### Deploying to the Board
-Copy [`src/xiao_nrf52840_sense/circuitpython/code.py`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/circuitpython/code.py) directly to the root of your `CIRCUITPY` USB drive as `code.py`:
+### Deploying CircuitPython to the Board (`cmd.exe`)
+Copy [`src/xiao_nrf52840_sense/circuitpython/code.py`](file:///c:/Users/jimco/Projects/ai-metronome/src/xiao_nrf52840_sense/circuitpython/code.py) directly to the mounted `CIRCUITPY` USB drive (or use `xiao-cli`):
 
-```powershell
-Copy-Item src\xiao_nrf52840_sense\circuitpython\code.py D:\code.py -Force
+```cmd
+:: Automated deploy & test via xiao-cli
+uv run xiao-cli python-deploy --test
+
+:: Or manual file copy
+copy /Y src\xiao_nrf52840_sense\circuitpython\code.py D:\code.py
 ```
-*(Replace `D:` with your `CIRCUITPY` drive letter. Requires zero external `/lib` dependencies.)*
+
+---
+
+## XIAO nRF52840 Sense — Embedded Rust Firmware (`v2.6`)
+
+### Windows `cmd.exe` Toolchain Commands
+All commands run directly in standard Windows Command Prompt (`cmd.exe`) without external GNU toolchains or debuggers:
+
+```cmd
+:: 1. Run Rust library unit tests natively on Windows
+cargo test --manifest-path src\xiao_nrf52840_sense\rust\Cargo.toml --lib --target x86_64-pc-windows-msvc
+
+:: 2. Cross-compile release binary and generate build\ai-metronome-rust.uf2
+uv run xiao-cli rust-build
+
+:: 3. Flash UF2 image to XIAO-SENSE bootloader drive
+uv run xiao-cli rust-deploy
+
+:: 4. Run automated 6-point Hardware-in-the-Loop test over COM9
+uv run xiao-cli hil-test --port COM9
+
+:: 5. Interactive live serial monitor & debug console
+uv run xiao-cli monitor --port COM9
+```
+
+### Interactive Serial Debug Keys
+While connected to `uv run xiao-cli monitor`:
+- **`d`**: Dump internal state (noise floor, dynamic threshold, PLL BPM/lock status, IMU $g$/jerk, battery V, die temp).
+- **`r`**: Re-run the full hardware self-test diagnostic banner (`[DIAG]`, `[MIC]`, `[IMU]`, `[CAL]`, `[READY]`).
+- **`1`**, **`2`**, **`3`**, **`4`**: Switch modes directly (`ON_BEAT`, `IN_BETWEEN`, `4/4`, `3/4`).
+- **`z`**: Trigger immediate 30s inactivity low-power sleep test.
+- **`b`**: Reboot directly into factory `XIAO-SENSE` UF2 bootloader mode.
 
 ### Onboard RGB LED Status Guide
 - **Solid / Blinking Blue**: Initializing hardware, verifying battery & thermal rails, waking `board.MIC_PWR`, verifying `PDMIn` DMA stream, and calibrating ambient room noise floor.

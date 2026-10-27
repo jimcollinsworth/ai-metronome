@@ -1,0 +1,42 @@
+- id: getting-started-nrf52840
+  title: "Getting Started with XIAO nRF52840"
+  content: |
+    # Getting Started with XIAO nRF52840 (Sense)
+
+    ## Prerequisites
+    - Arduino IDE 2.x
+    - USB-C cable
+
+    ## Setup Arduino IDE
+
+    1. **Install nRF52 Board Package:**
+       - Go to File > Preferences
+       - Add to "Additional Board Manager URLs":
+         `https://adafruit.github.io/arduino-board-index/package_adafruit_index.json`
+       - Boards Manager > search "adafruit nrf52" > install
+
+    2. **Select board:**
+       - Tools > Board > Adafruit nRF52 > Seeed XIAO nRF52840
+
+    3. **Upload bootloader (first time):**
+       - Tools > Programmer > Bootloader DFU for nRF52
+       - Tools > Burn Bootloader
+       - Wait for completion
+
+    ## Using onboard sensors (Sense version)
+    The nRF52840 Sense includes:
+    - **LSM6DS3TR-C** 6-axis IMU (accelerometer + gyroscope)
+    - **MP34DT06J** MEMS microphone
+
+    Install required libraries:
+    - Adafruit LSM6DS
+    - PDM (for microphone)
+
+    ## Bluetooth LE
+    The nRF52840 supports BLE 5.0. Use the ArduinoBLE library:
+    ```cpp
+    #include <ArduinoBLE.h>
+    ```
+  category: getting-started
+  boards: [nrf52840, nrf52840-sense]
+  wikiUrl: https://wiki.seeedstudio.com/XIAO_BLE/

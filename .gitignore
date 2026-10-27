@@ -25,6 +25,10 @@ htmlcov/
 *.swp
 *.swo
 
+# Rust target directories
+target/
+src/xiao_nrf52840_sense/rust/target/
+
 # OS files
 .DS_Store
 Thumbs.db

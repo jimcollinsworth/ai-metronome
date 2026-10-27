@@ -1,0 +1,146 @@
+- id: nrf52840
+  name: XIAO nRF52840
+  fullName: Seeed Studio XIAO nRF52840
+  microcontroller: nRF52840
+  architecture: ARM Cortex-M4 (with FPU)
+  clockSpeed: 64 MHz
+  flashSize: 1MB + 2MB (external)
+  ramSize: 256KB
+  onboardFlash: 2MB
+  pins:
+    digital:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    analog:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    pwm:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    i2c:
+    - sda: 4
+      scl: 5
+    spi:
+    - mosi: 10
+      miso: 9
+      sck: 8
+      cs: 3
+    uart:
+    - tx: 6
+      rx: 7
+  features:
+  - USB-C
+  - Battery charging
+  - Reset button
+  connectivity:
+  - Bluetooth 5.0
+  builtinSensors: []
+  supportedLanguages:
+  - arduino
+  - micropython
+  - circuitpython
+  - platformio
+  - zephyr
+  hasResetButton: true
+  hasBootButton: false
+  hasBatteryCharging: true
+  lowPowerMode: 5µA deep sleep
+  wikiUrl: https://wiki.seeedstudio.com/XIAO_BLE/
+  sku: '102010448'
+- id: nrf52840-sense
+  name: XIAO nRF52840 Sense
+  fullName: Seeed Studio XIAO nRF52840 Sense
+  variantOf: nrf52840
+  microcontroller: nRF52840
+  architecture: ARM Cortex-M4 (with FPU)
+  clockSpeed: 64 MHz
+  flashSize: 1MB + 2MB (external)
+  ramSize: 256KB
+  onboardFlash: 2MB
+  pins:
+    digital:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    analog:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    pwm:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    i2c:
+    - sda: 4
+      scl: 5
+    spi:
+    - mosi: 10
+      miso: 9
+      sck: 8
+      cs: 3
+    uart:
+    - tx: 6
+      rx: 7
+  features:
+  - USB-C
+  - Battery charging
+  - Reset button
+  - User LED
+  connectivity:
+  - Bluetooth 5.0
+  builtinSensors:
+  - 6-axis IMU (LSM6DS3TR-C)
+  - Microphone
+  supportedLanguages:
+  - arduino
+  - micropython
+  - circuitpython
+  - platformio
+  - zephyr
+  hasResetButton: true
+  hasBootButton: false
+  hasBatteryCharging: true
+  lowPowerMode: 5µA deep sleep
+  wikiUrl: https://wiki.seeedstudio.com/XIAO_BLE/
+  sku: '102010469'

@@ -29,9 +29,14 @@ class MetronomeMode(IntEnum):
 MODE_NAMES: dict[MetronomeMode, str] = {
     MetronomeMode.ON_BEAT: "1: On Beat (1x)",
     MetronomeMode.UPBEAT: "2: In-Between / Upbeat (&)",
-    MetronomeMode.METER_4_4: "3: 4/4 Meter (Green on 1)",
-    MetronomeMode.METER_3_4: "4: 3/4 Meter (Green on 1)",
+    MetronomeMode.METER_4_4: "3: 4/4 Meter (Green on 1, Red 2-4)",
+    MetronomeMode.METER_3_4: "4: 3/4 Meter (Green on 1, Red 2-3)",
 }
+
+
+BRIGHTNESS_FULL = 1.0
+BRIGHTNESS_DIM_METER = 0.12
+BRIGHTNESS_DIM_UNLOCKED = 0.10
 
 
 @dataclass
@@ -41,6 +46,7 @@ class FlashEvent:
     color: str
     target_time: float
     beat_num: int | None = None
+    brightness: float = BRIGHTNESS_FULL
 
 
 class GestureDetector:
@@ -72,6 +78,8 @@ class GestureDetector:
         self.in_stroke: bool = False
         self.last_trigger_time: float = -10.0
         self.shake_peaks: list[float] = []
+        self.last_dyn: float = 0.0
+        self.last_jerk: float = 0.0
 
     def update(self, ax_g: float, ay_g: float, az_g: float, now: float) -> tuple[bool, str]:
         """Process a 3-axis accelerometer reading in g's at timestamp `now`.
@@ -91,6 +99,8 @@ class GestureDetector:
             jerk = 0.0
 
         self.prev_accel = (ax_g, ay_g, az_g)
+        self.last_dyn = dyn
+        self.last_jerk = jerk
 
         if (now - self.last_trigger_time) < self.debounce_sec:
             return False, ""
@@ -134,17 +144,20 @@ class ModeEngine:
         phase_gain: float = 0.35,
         freq_gain: float = 0.22,
         max_coast_beats: int = 3,
+        lock_intervals_required: int = 2,
     ) -> None:
         self.current_mode: MetronomeMode = initial_mode
         self.pause_reset_sec: float = pause_reset_sec
         self.phase_gain: float = phase_gain
         self.freq_gain: float = freq_gain
         self.max_coast_beats: int = max_coast_beats
+        self.lock_intervals_required: int = lock_intervals_required
 
         self.last_click_time: float | None = None
         self.beat_count: int = 0
         self.period: float = 0.5
         self.is_locked: bool = False
+        self._lock_intervals: int = 0
         self.last_beat_time: float | None = None
         self.next_beat_time: float | None = None
         self.coasted_beats: int = 0
@@ -161,6 +174,7 @@ class ModeEngine:
         """Reset beat counter and unlock internal PLL oscillator."""
         self.beat_count = 0
         self.is_locked = False
+        self._lock_intervals = 0
         self.last_beat_time = None
         self.next_beat_time = None
         self.coasted_beats = 0
@@ -186,17 +200,33 @@ class ModeEngine:
         immediate: list[FlashEvent] = []
 
         if self.current_mode == MetronomeMode.ON_BEAT:
-            immediate.append(FlashEvent(color="RED", target_time=beat_time, beat_num=self.beat_count))
+            lvl = BRIGHTNESS_FULL if self.is_locked else BRIGHTNESS_DIM_UNLOCKED
+            immediate.append(
+                FlashEvent(color="RED", target_time=beat_time, beat_num=self.beat_count, brightness=lvl)
+            )
 
         elif self.current_mode == MetronomeMode.UPBEAT:
             if self.period > 0:
+                lvl = BRIGHTNESS_FULL if self.is_locked else BRIGHTNESS_DIM_UNLOCKED
                 self._scheduled_flashes.append(
-                    FlashEvent(color="BLUE", target_time=beat_time + (self.period / 2.0), beat_num=self.beat_count)
+                    FlashEvent(
+                        color="BLUE",
+                        target_time=beat_time + (self.period / 2.0),
+                        beat_num=self.beat_count,
+                        brightness=lvl,
+                    )
                 )
 
         elif self.current_mode in (MetronomeMode.METER_4_4, MetronomeMode.METER_3_4):
             if self.beat_count == 1:
-                immediate.append(FlashEvent(color="GREEN", target_time=beat_time, beat_num=1))
+                color = "GREEN"
+                lvl = BRIGHTNESS_FULL if self.is_locked else BRIGHTNESS_DIM_UNLOCKED
+            else:
+                color = "RED"
+                lvl = BRIGHTNESS_DIM_METER if self.is_locked else BRIGHTNESS_DIM_UNLOCKED
+            immediate.append(
+                FlashEvent(color=color, target_time=beat_time, beat_num=self.beat_count, brightness=lvl)
+            )
 
         return immediate
 
@@ -215,22 +245,35 @@ class ModeEngine:
         self.last_click_time = now
         self.coasted_beats = 0
 
-        # 2. First click after silence: initialize beat 1 immediately
+        # 2. First click after silence: initialize beat 1 immediately (unlocked / dimmed)
         if measured_dt is None:
             if ioi > 0:
                 self.period = ioi
             return self._emit_beat(now)
 
-        # 3. Second click (or unlocked state): acquire lock if interval is musical (30..300 BPM)
+        # 3. Unlocked state: require `lock_intervals_required` consistent intervals to lock in
         if not self.is_locked:
             if 0.20 <= measured_dt <= 2.0:
-                self.period = measured_dt
-                self.is_locked = True
-                flashes = self._emit_beat(now)
-                self.next_beat_time = now + self.period
-                return flashes
-            if ioi > 0:
-                self.period = ioi
+                if self._lock_intervals == 0:
+                    self.period = measured_dt
+                    self._lock_intervals = 1
+                elif abs(measured_dt - self.period) < (0.28 * self.period):
+                    self.period = (1.0 - self.freq_gain) * self.period + (self.freq_gain * measured_dt)
+                    self._lock_intervals += 1
+                else:
+                    # Tempo interval changed before lock-in; restart interval confirmation
+                    self.period = measured_dt
+                    self._lock_intervals = 1
+
+                if self._lock_intervals >= self.lock_intervals_required:
+                    self.is_locked = True
+                    flashes = self._emit_beat(now)
+                    self.next_beat_time = now + self.period
+                    return flashes
+            else:
+                self._lock_intervals = 0
+                if ioi > 0:
+                    self.period = ioi
             return self._emit_beat(now)
 
         # 4. Locked PLL state: compare click timestamp against internal clock beats
@@ -253,11 +296,15 @@ class ModeEngine:
             self.next_beat_time = corrected_beat + self.period
             return flashes
 
-        # Otherwise, tempo changed significantly: re-lock onto new interval
+        # Otherwise, tempo changed significantly: drop lock until confirmed at new tempo
+        self.is_locked = False
         if 0.20 <= measured_dt <= 2.0:
             self.period = measured_dt
+            self._lock_intervals = 1
+        else:
+            self._lock_intervals = 0
         flashes = self._emit_beat(now)
-        self.next_beat_time = now + self.period
+        self.next_beat_time = None
         return flashes
 
     def _update_period_from_interval(self, measured_dt: float) -> None:
@@ -298,3 +345,47 @@ class ModeEngine:
                 remaining.append(event)
         self._scheduled_flashes = remaining
         return due
+
+
+class SleepWakeController:
+    """Manages idle CPU/microphone sleep after inactivity and motion-triggered wake-up."""
+
+    def __init__(
+        self,
+        idle_timeout_sec: float = 45.0,
+        motion_keepawake_g: float = 0.08,
+        wake_motion_g: float = 0.12,
+    ) -> None:
+        self.idle_timeout_sec = idle_timeout_sec
+        self.motion_keepawake_g = motion_keepawake_g
+        self.wake_motion_g = wake_motion_g
+        self.last_activity_time: float = 0.0
+        self.is_sleeping: bool = False
+
+    def record_activity(self, now: float) -> None:
+        """Reset inactivity timer (e.g. when a click or deliberate movement occurs)."""
+        self.last_activity_time = now
+
+    def check_motion_and_should_sleep(self, dyn_g: float, jerk_g: float, now: float) -> bool:
+        """Update activity from accelerometer motion and return True if device should enter sleep."""
+        if self.last_activity_time == 0.0:
+            self.last_activity_time = now
+            return False
+
+        if dyn_g >= self.motion_keepawake_g or jerk_g >= self.motion_keepawake_g:
+            self.last_activity_time = now
+            return False
+
+        if (now - self.last_activity_time) >= self.idle_timeout_sec:
+            self.is_sleeping = True
+            return True
+
+        return False
+
+    def check_should_wake(self, dyn_g: float, jerk_g: float, now: float, int1_active: bool = False) -> bool:
+        """Return True if movement or IMU_INT1 hardware interrupt wakes the device from sleep."""
+        if int1_active or dyn_g >= self.wake_motion_g or jerk_g >= self.wake_motion_g:
+            self.is_sleeping = False
+            self.last_activity_time = now
+            return True
+        return False

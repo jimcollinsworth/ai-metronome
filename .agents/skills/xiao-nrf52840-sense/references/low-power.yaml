@@ -1,0 +1,292 @@
+- id: esp32-deepsleep-gpio-hold
+  title: "ESP32 GPIO State Lost After Deep Sleep"
+  tags: [deep sleep, gpio, power, esp32c3, esp32s3, hold, relay, mosfet]
+  boards: [esp32c3, esp32s3, esp32s3-sense, esp32c6]
+  category: power
+  severity: hard
+  source: support-ticket
+  summary: |
+    On ESP32 series, normal GPIO output states are reset to LOW after entering deep sleep.
+    If GPIO is used to control relays, MOSFETs, LEDs, or other peripherals, they will
+    unexpectedly turn off after wake-up. The RTC GPIO hold function must be used to maintain
+    pin levels during sleep.
+  problem: |
+    Customer used XIAO ESP32C3 GPIO2 to control a relay. After entering deep sleep,
+    the relay disengaged. Although code re-sets GPIO2 to HIGH after wake, there is a gap
+    where the relay is off. For applications requiring uninterrupted power (e.g. heater
+    control), this is unacceptable.
+  solution: |
+    Use gpio_hold_en() to lock GPIO state before entering deep sleep, and
+    gpio_deep_sleep_hold_en() to enable hold during deep sleep.
+    Note: only RTC GPIOs (GPIO0-5 on ESP32C3) support this feature.
+  code: |
+    void enterDeepSleep() {
+      // Set GPIO state
+      digitalWrite(2, HIGH);
+
+      // Enable GPIO hold to lock current state
+      gpio_hold_en(GPIO_NUM_2);
+      gpio_deep_sleep_hold_en();
+
+      // Enter deep sleep
+      esp_sleep_enable_timer_wakeup(10 * 1000000);  // 10 seconds
+      esp_deep_sleep_start();
+    }
+
+    void setup() {
+      // Release hold after wake-up, restore normal control
+      gpio_hold_dis(GPIO_NUM_2);
+      gpio_deep_sleep_hold_dis();
+
+      pinMode(2, OUTPUT);
+      digitalWrite(2, HIGH);  // Ensure state
+    }
+  workaround: |
+    If the pin is not an RTC GPIO (e.g. GPIO6-10), hold is not available.
+    Alternatives:
+    1. Rewire to an RTC GPIO (GPIO0-5)
+    2. Use an external latch chip (e.g. 74HC573)
+    3. Use external pull-up resistor with active-low design
+
+- id: esp32-battery-voltage-read
+  title: "Correct Method to Read Battery Voltage on ESP32"
+  tags: [battery, adc, voltage, power, esp32c3, esp32s3, battery monitoring]
+  boards: [esp32c3, esp32s3, esp32s3-sense, esp32c6]
+  category: power
+  severity: medium
+  source: internal-test
+  summary: |
+    Battery voltage on XIAO ESP32 series cannot be read accurately with a simple
+    analogRead(). The VBAT pin is connected to ADC through a voltage divider and
+    requires calibration. ESP32 ADC non-linearity can cause up to 0.3V error
+    with direct readings.
+  problem: |
+    Customer used analogRead() for battery voltage but readings were inaccurate.
+    A fully charged 4.2V battery showed only 3.8V, causing incorrect battery
+    level estimation and premature low-power shutdown.
+  solution: |
+    Use multi-sample averaging to reduce ADC noise, then apply the voltage divider
+    ratio to calculate actual voltage. The XIAO ESP32 battery sense pin uses two
+    100K resistors as divider. ADC reading must be multiplied by 2.
+  code: |
+    #include <esp_adc_cal.h>
+
+    #define VBAT_PIN 2  // Verify battery sense pin for your specific board
+
+    float readBatteryVoltage() {
+      // Multi-sample averaging to reduce ADC noise
+      long sum = 0;
+      for (int i = 0; i < 64; i++) {
+        sum += analogRead(VBAT_PIN);
+      }
+      float avg = sum / 64.0;
+
+      // Convert to voltage (divider ratio * ADC reference / ADC resolution)
+      // XIAO ESP32 divider ratio ~2:1, reference 3.3V, 12-bit ADC
+      float voltage = (avg / 4095.0) * 3.3 * 2.0;
+
+      return voltage;
+    }
+
+    int getBatteryPercentage(float voltage) {
+      if (voltage >= 4.2) return 100;
+      if (voltage <= 3.0) return 0;
+      // Simple linear map (actual LiPo discharge curve is non-linear)
+      return (int)((voltage - 3.0) / 1.2 * 100);
+    }
+
+    void setup() {
+      Serial.begin(115200);
+      analogSetAttenuation(ADC_11db);  // Set attenuation for 0-3.3V range
+    }
+
+    void loop() {
+      float vbat = readBatteryVoltage();
+      Serial.printf("Battery: %.2fV (%d%%)\n", vbat, getBatteryPercentage(vbat));
+      delay(5000);
+    }
+
+- id: rp2040-usb-disconnect-sleep
+  title: "RP2040 USB Does Not Reconnect After Deep Sleep"
+  tags: [deep sleep, usb, rp2040, rp2350, serial, disconnect]
+  boards: [rp2040, rp2350]
+  category: power
+  severity: hard
+  source: support-ticket
+  summary: |
+    XIAO RP2040 USB connection does not automatically restore after waking from
+    Dormant mode (deep sleep). Serial Monitor disconnects and cannot reconnect.
+    A physical USB unplug/replug or watchdog-triggered hardware reset is required.
+  problem: |
+    Customer used XIAO RP2040 for a low-power sensor that periodically wakes to
+    collect data then re-enters sleep. After the first sleep/wake cycle, USB serial
+    port disconnected and could not be reopened for logging. This caused major issues
+    for debugging and production firmware updates.
+  solution: |
+    Option 1: Use light sleep instead of deep sleep. USB stays connected but current
+    is higher (~3mA).
+    Option 2: Re-initialize USB with tud_init() after wake-up.
+    Option 3: If USB debugging is not needed, use UART for log output.
+  code: |
+    #include <Arduino.h>
+    #include "hardware/sleep.h"
+    #include "hardware/rosc.h"
+    #include "hardware/clocks.h"
+
+    void enterLightSleep(uint32_t ms) {
+      // Light sleep: USB stays connected, ~3mA current draw
+      sleep_ms(ms);
+    }
+
+    void enterDeepSleepWithUsbReinit(uint32_t ms) {
+      Serial.flush();
+
+      // Enter dormant mode (deep sleep, ~0.5mA)
+      // ... use RTC or external wake source ...
+
+      // Re-initialize USB after wake-up
+      delay(100);  // Wait for clock to stabilize
+      tud_init(BOARD_DEVICE_RHPORT_NUM);
+      Serial.begin(115200);
+      delay(100);
+
+      Serial.println("Woke up from deep sleep!");
+    }
+
+- id: nrf52840-ble-mac-address
+  title: "nRF52840 BLE MAC Address Changes on Every Reboot"
+  tags: [ble, mac, address, nrf52840, bluetooth, pairing]
+  boards: [nrf52840, nrf52840-sense]
+  category: ble
+  severity: medium
+  source: community
+  summary: |
+    XIAO nRF52840 uses a random static address by default. BLE MAC address changes
+    on every reboot, causing paired devices to require re-pairing on each restart.
+    A fixed MAC address must be set before BLE.begin().
+  problem: |
+    Customer built a heart rate monitor with XIAO nRF52840, connecting to a phone
+    app via BLE. After every reboot, the phone recognized it as a new device and
+    required re-pairing. Poor user experience.
+  solution: |
+    Read the factory-programmed MAC address from the FICR registers before starting
+    BLE. The nRF52 FICR->DEVICEADDR registers contain the unique device address.
+  code: |
+    #include <ArduinoBLE.h>
+
+    void setup() {
+      Serial.begin(115200);
+
+      // Read factory MAC address (unique per nRF52 device)
+      // FICR->DEVICEADDR[0] and [1] contain the factory address
+      uint32_t addrLow = NRF_FICR->DEVICEADDR[0];
+      uint32_t addrHigh = NRF_FICR->DEVICEADDR[1];
+
+      char macStr[18];
+      sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+        (addrHigh >> 8) & 0xFF,
+        addrHigh & 0xFF,
+        (addrLow >> 24) & 0xFF,
+        (addrLow >> 16) & 0xFF,
+        (addrLow >> 8) & 0xFF,
+        addrLow & 0xFF);
+
+      Serial.print("Device MAC: ");
+      Serial.println(macStr);
+
+      if (!BLE.begin()) {
+        Serial.println("BLE start failed!");
+        while (1);
+      }
+
+      BLE.setLocalName("XIAO-HRM");
+      // Note: nRF52 DEVICEADDR top 2 bits are fixed 0xC0 (random address flag)
+      // Using a public address requires additional configuration
+
+      BLE.advertise();
+    }
+
+- id: esp32-wifi-ble-coexist
+  title: "ESP32 WiFi and BLE Cannot Work Simultaneously"
+  tags: [wifi, ble, coexist, esp32, radio, conflict, disconnect]
+  boards: [esp32c3, esp32s3, esp32s3-sense, esp32c6]
+  category: wifi
+  severity: hard
+  source: support-ticket
+  summary: |
+    ESP32 series WiFi and BLE share a single 2.4GHz radio module. Using both
+    simultaneously causes radio time-slicing, making both unstable: WiFi throughput
+    drops and BLE connections timeout or disconnect. This is a hardware limitation
+    that can only be mitigated through software strategy.
+  problem: |
+    Customer built an MQTT + BLE gateway with XIAO ESP32S3: collecting sensor data
+    via BLE and uploading to cloud via WiFi MQTT. With both active simultaneously,
+    MQTT message delay reached 5-10 seconds and BLE connections frequently dropped.
+  solution: |
+    Use time-division multiplexing: disable WiFi during BLE scanning, then disable
+    BLE during WiFi upload. Alternatively, enable ESP32 coexistence mode (requires
+    menuconfig configuration).
+  code: |
+    #include <WiFi.h>
+    #include <PubSubClient.h>
+    #include <BLEDevice.h>
+
+    // Strategy: alternate BLE and WiFi, never both active
+
+    void bleScanPhase() {
+      // Turn off WiFi to free radio resources
+      WiFi.mode(WIFI_OFF);
+
+      // BLE scan and connect...
+      // Collect sensor data into buffer
+    }
+
+    void wifiUploadPhase() {
+      // After BLE scan, disable BLE
+      // BLEDevice::deinit(false);  // Keep bonding info
+
+      // Enable WiFi and upload data
+      WiFi.mode(WIFI_STA);
+      WiFi.begin("SSID", "password");
+      while (WiFi.status() != WL_CONNECTED) delay(100);
+
+      // MQTT publish data...
+      // client.publish("topic", payload);
+
+      // Turn off WiFi after sending
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+    }
+
+    void loop() {
+      bleScanPhase();      // 10s BLE collection
+      wifiUploadPhase();   // WiFi upload
+      // Return to BLE mode...
+    }
+
+- id: xiao-3v3-warning-grove
+  title: "5V Grove Modules Connected Directly to XIAO Will Damage Pins"
+  tags: [voltage, 3.3v, 5v, grove, level shifter, damage, gpio]
+  boards: [esp32c3, esp32s3, esp32s3-sense, esp32c6, rp2040, rp2350, nrf52840, nrf52840-sense, samd21, ra4m1, mg24, mg24-sense]
+  category: hardware
+  severity: easy
+  source: support-ticket
+  summary: |
+    All XIAO boards have 3.3V GPIO logic levels and cannot tolerate 5V input.
+    Some older Grove modules (e.g. Grove LCD RGB, some ultrasonic sensors) operate
+    at 5V. Connecting them directly to XIAO I2C/GPIO pins can permanently damage
+    the chip. A level shifter or 3.3V-compatible module version must be used.
+  problem: |
+    Customer plugged a 5V Grove LCD RGB Backlight directly into the XIAO ESP32C3
+    Grove expansion board. I2C communication worked for a while, but after a few
+    days the I2C pins (GPIO6/GPIO7) failed completely, rendering the board unusable.
+  solution: |
+    1. Use the XIAO-specific Grove expansion board (has built-in level shifting)
+    2. Or add an I2C level shifter (e.g. PCA9306) between the 5V module and XIAO
+    3. Grove modules can be powered at 5V (VCC), but signal lines must be level-shifted
+    4. Prefer Grove modules marked "3.3V compatible" by Seeed Studio
+  workaround: |
+    If no level shifter is available, a 10K series resistor on the 5V module's
+    SDA/SCL output lines combined with the XIAO's internal ESD protection diodes
+    can provide basic clamping. This is a temporary workaround only, not for
+    long-term use.

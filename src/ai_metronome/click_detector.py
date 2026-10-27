@@ -75,10 +75,10 @@ class PDMClickDetector:
     def __init__(
         self,
         sample_rate: int = 16000,
-        peak_snr_mult: float = 5.5,
-        mean_snr_mult: float = 1.5,
-        min_peak_threshold: int = 750,
-        attack_slope_ratio: float = 1.6,
+        peak_snr_mult: float = 4.8,
+        mean_snr_mult: float = 1.4,
+        min_peak_threshold: int = 620,
+        attack_slope_ratio: float = 1.45,
         refractory_sec: float = 0.12,
         ema_alpha: float = 0.04,
     ) -> None:
@@ -91,8 +91,8 @@ class PDMClickDetector:
         self.ema_alpha = ema_alpha
 
         self.noise_floor_mean: float = 40.0
-        self.noise_floor_peak: float = 120.0
-        self.prev_quiet_peak: float = 120.0
+        self.noise_floor_peak: float = 100.0
+        self.prev_quiet_peak: float = 100.0
         self.last_click_time: float = -10.0
         self.click_count: int = 0
         self.recent_intervals: list[float] = []
@@ -111,12 +111,15 @@ class PDMClickDetector:
         return hp_mean, hp_peak
 
     def finalize_calibration(self) -> tuple[float, float]:
-        """Compute baseline ambient noise floor from collected calibration frames."""
+        """Compute outlier-resistant baseline ambient noise floor from calibration frames."""
         if self._cal_means:
-            avg_mean = sum(self._cal_means) / len(self._cal_means)
-            avg_peak = sum(self._cal_peaks) / len(self._cal_peaks)
-            self.noise_floor_mean = max(15.0, avg_mean)
-            self.noise_floor_peak = max(60.0, avg_peak)
+            sorted_means = sorted(self._cal_means)
+            sorted_peaks = sorted(self._cal_peaks)
+            q_idx = max(0, len(sorted_means) // 3)
+            med_mean = float(sorted_means[q_idx])
+            med_peak = float(sorted_peaks[q_idx])
+            self.noise_floor_mean = min(80.0, max(15.0, med_mean))
+            self.noise_floor_peak = min(180.0, max(60.0, med_peak))
             self.prev_quiet_peak = self.noise_floor_peak
         self.is_calibrated = True
         return self.noise_floor_mean, self.noise_floor_peak
@@ -137,7 +140,7 @@ class PDMClickDetector:
             float(self.min_peak_threshold),
             self.noise_floor_peak * self.peak_snr_mult,
         )
-        mean_thresh = max(25.0, self.noise_floor_mean * self.mean_snr_mult)
+        mean_thresh = max(22.0, self.noise_floor_mean * self.mean_snr_mult)
 
         elapsed = onset_time - self.last_click_time
         in_refractory = elapsed < self.refractory_sec
@@ -151,7 +154,7 @@ class PDMClickDetector:
             (not in_refractory)
             and (hp_peak >= peak_thresh)
             and (hp_mean >= mean_thresh)
-            and (crest_ratio >= 2.1)
+            and (crest_ratio >= 1.9)
             and is_sharp_attack
         )
 
