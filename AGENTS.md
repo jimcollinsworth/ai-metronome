@@ -43,7 +43,14 @@ This document outlines the operational principles, technical constraints, design
 
 ---
 
-## 4. Work Tracking & Commit Workflow
+## 4. Multi-Machine Git & Commit Workflow
+
+> [!IMPORTANT]
+> **Always Fetch/Pull from Origin Before Any Git Activity**:
+> - Jim develops across multiple physical machines.
+> - The agent **MUST ALWAYS run `git pull origin <branch>` (or `git fetch origin` followed by rebase/merge) before starting any git commit, branching, or push operations**, and before starting work sessions.
+> - This guarantees local branches stay synchronized with remote work, avoiding out-of-date HEADs and unnecessary merge conflicts.
+> - Always verify that working trees and tracking branches are clean and up to date before making success assertions or pushing.
 
 - Active tasks and sprint status live in `PLANNING.md`.
 - Architectural decisions and technical log entries are recorded in `JOURNAL.md`.

@@ -6,7 +6,17 @@ Strategic proposals, architecture ideas, and long-term roadmap for `ai-metronome
 
 ## 1. Vision & Core Philosophy
 
-[Placeholder: high-level vision, audio/timing principles, and creative goals to be defined by Jim]
+### Acoustic Augmentation in Real-World Musical Environments
+`ai-metronome` is built on the philosophy of non-intrusive musical augmentation: working harmoniously alongside authentic physical instruments and traditional mechanical metronomes rather than replacing them with sterile digital beeps.
+
+A central design requirement is reliable operation in hostile acoustic environments—specifically when the metronome is **positioned directly on top of an actively played piano**. In this scenario, the microphone is subjected to massive acoustic energy across the entire frequency spectrum (27.5 Hz to 4,186+ Hz), loud percussive hammer-string onsets, sustain pedal sympathetic resonance, and structural vibrations conducted through the piano lid and metronome enclosure.
+
+### Multi-Tiered Acoustic Isolation Strategy
+To reliably lock onto the mechanical escapement click while ignoring musical performance audio:
+1. **Physical Enclosure Advantage**: Housing the microphone inside the metronome body creates a favorable signal-to-noise ratio (SNR) for internal mechanical clicks compared to external ambient sound.
+2. **Deterministic Transient DSP**: Filtering with steep high-pass/bandpass characteristics (1 kHz to 6 kHz), evaluating attack-slope velocity ($\Delta \text{amplitude} / \Delta t < 1.5\,\text{ms}$), crest factor, and spectral flatnesses to reject harmonic piano tones.
+3. **Machine Learning / TinyML Classification**: Employing lightweight neural transient classifiers (running under CMSIS-NN / TFLite Micro) to distinguish authentic escapement clicks from piano hammer onsets, percussive taps, and ambient speech.
+4. **Active Internal Echo & Speaker Cancellation**: When an audio output transducer/speaker is integrated into future hardware revisions, the firmware will implement reference-based acoustic echo cancellation (AEC) or synchronous phase gating so the unit's own sounds never corrupt the incoming click detector stream.
 
 ---
 

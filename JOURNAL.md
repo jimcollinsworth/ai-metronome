@@ -68,6 +68,56 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-21 — CJMCU-2812-8 (8x NeoPixel Stick) Integration & Subtle Multi-Mode Visualizer
+
+> [!NOTE] User Instructions & Guidance:
+> - *"ok leds work, lets add something very simple to the app now. each of the four modes should have some meaningful effect, keep things very subtle though"*
+
+### ADR 009: Unified Multi-Mode Visualizer with Subtle Peripheral NeoPixel Cueing
+- **Context**: The user wired an 8-LED WS2812B NeoPixel stick (CJMCU-2812-8) to `board.D0` on the XIAO nRF52840 Sense. Initial testing at 12% brightness with narrow 2-pixel clusters was too faint under ambient room light. The user requested a visual hardware self-test on startup to confirm LED stick operation.
+- **Decision**:
+  1. **Startup Hardware Self-Test & 3-Blink Green Ready Confirmation**:
+     - Added `run_startup_pattern()` executing during `init_hardware`: a rapid cyan/blue sweep across pixels 0 through 7 (35ms per pixel) followed by a 120ms warm amber pulse.
+     - Updated `signal_init_ok()` to blink all 8 NeoPixels in vivid green (`0, 255, 40`) 3 times in sync with the onboard Green LED.
+  2. **Zero-Dependency Native Driver (`neopixel_write`)**:
+     - Integrated unified `StatusLEDs` controller directly into `src/xiao_nrf52840_sense/circuitpython/code.py` using CircuitPython's built-in `neopixel_write` module, avoiding external `/lib` dependencies.
+     - Pre-allocated 24-byte pixel buffer in `__init__` for zero heap allocations during the 5ms / ~147 Hz audio DMA loop.
+  3. **Vivid Peripheral Visual Choreography (22% Base Brightness)**:
+     - Boosted brightness from 12% to 22% (`NEOPIXEL_BRIGHTNESS = 0.22`) to match the working hardware demo level without harsh glare.
+     - **Mode 1 (On-Beat 1x)**: Pendulum rock (tick-tock) alternating between left cluster `[1, 2, 3]` and right cluster `[4, 5, 6]` in warm amber-red `(255, 40, 0)`.
+     - **Mode 2 (In-Between / Upbeat &)**: Rhythmic center anchor `[3, 4]` in deep purple `(180, 0, 220)` on physical clicks + cyan-blue outer wing pulse `[0, 1]` & `[6, 7]` on syncopated off-beats.
+     - **Mode 3 (4/4 Meter)**: 2-LED progressive measure bar stepping across the 8 pixels: Beat 1 = `[0, 1]` (accent green), Beat 2 = `[2, 3]` (warm amber), Beat 3 = `[4, 5]` (vivid teal), Beat 4 = `[6, 7]` (warm amber).
+     - **Mode 4 (3/4 Meter)**: Symmetrical waltz triple-step (3 - 2 - 3): Beat 1 = `[0, 1, 2]` (accent green), Beat 2 = `[3, 4]` (warm amber), Beat 3 = `[5, 6, 7]` (warm amber).
+  4. **Verification**:
+     - Deployed directly to hardware via `uv run xiao-cli deploy`.
+     - Verified passing all 6 hardware checkpoints in `xiao-cli hil-test` (`COM5` / `F:\`). All 12 host unit tests continue to pass.
+
+---
+
+## 2026-10-21 — Architectural Review: Piano Acoustic Isolation, Transient Discrimination & Self-Sound Cancellation
+
+> [!NOTE] User Instructions & Guidance:
+> - *"reviewing readme - add project description and purpose, a few paragraphs. add how the modes are switched"*
+> - *"reviewing rroadmap - "*
+> - *"planning - issues/questions - the microphone and transient processing must work even if the metronome is on top of a playing piano - mic is inside metronome so that helps, but we might need to do more intelligent 'listening' of the sounds and actively (with filters/models) hear the click but drown out the other instruments (including our own sounds when a speaker is added)"*
+
+### ADR 008: Hostile Acoustic Environment Strategy (Piano Isolation & Internal Speaker AEC)
+- **Context**: The device is intended to sit directly on or inside a physical mechanical metronome positioned on top of a piano during live playing. This introduces extreme acoustic and mechanical noise: polyphonic piano chords across 27.5 Hz – 4,186+ Hz, percussive hammer strikes, pedal mechanical thumps, and acoustic feedback from any future onboard speaker.
+- **Decision**:
+  1. **Documentation Updates**:
+     - Updated `README.md` with comprehensive project description, operational purpose, full breakdown of the 4-mode visual engine, and a complete reference for the `xiao-cli` developer tool (`status`, `deploy`, `hil-test`, `monitor`, `reset`, overrides).
+     - Updated `ROADMAP.md` Section 1 with the multi-tiered acoustic isolation strategy (enclosure advantage, transient DSP, TinyML classification, active echo cancellation).
+     - Expanded `PLANNING.md` with detailed Open Issues and Technical Questions covering piano hammer onset rejection, structural vibration coupling, and reference-based self-sound cancellation.
+  2. **Technical Architecture Roadmap**:
+     - *Physical Housing Advantage*: Take advantage of the microphone mounted inside the metronome casing for extreme near-field proximity to the escapement mechanism.
+     - *Acoustic Discrimination Filterbank*: Investigate 2.5 kHz–5.5 kHz bandpass filtering, envelope attack-slope gating ($<1.5\,\text{ms}$ rise time), and crest factor metrics to isolate impulsive non-harmonic mechanical clicks from harmonic piano strings.
+     - *TinyML / TFLite Micro Classification*: Plan for an on-device transient classifier running on the Cortex-M4F to identify authentic escapement clicks vs. musical instruments.
+     - *Speaker Blanking / Echo Cancellation*: Design synchronous timing-gate blanking and NLMS reference-based acoustic echo cancellation (AEC) into the roadmap before adding onboard speaker hardware.
+
+---
+
+---
+
 ## 2026-10-20 — Meter Color Update (Green on 1, Red on Others), Reset-to-Mode-1, Zero-Allocation DSP & MCU Skills
 
 > [!NOTE] User Instructions & Guidance:

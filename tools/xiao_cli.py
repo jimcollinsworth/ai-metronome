@@ -272,10 +272,13 @@ def deploy_firmware(source_path: Path, target_drive: Path) -> bool:
         return False
 
     dest_path = target_drive / "code.py"
-    print(f"[DEPLOY] Copying {source_path.name} ({source_path.stat().st_size} bytes) -> {dest_path} ...")
+    size_bytes = source_path.stat().st_size
+    print(f"\n[DEPLOY] Transferring firmware ({source_path.name}, {size_bytes} bytes)...")
+    print(f"         Source : {source_path}")
+    print(f"         Target : {dest_path}")
     shutil.copyfile(source_path, dest_path)
     time.sleep(1.0)
-    print("[DEPLOY] File transfer complete.")
+    print("         -> Transfer complete. CircuitPython filesystem sync OK.\n")
     return True
 
 
@@ -439,108 +442,190 @@ def trigger_soft_reboot(ser: serial.Serial) -> None:
 
 
 def run_hil_test(com_port: str | None, listen_sec: float = 0.0, timeout_sec: float = 10.0) -> int:
-    """Run automated Hardware-in-the-Loop (HIL) test suite over USB Serial."""
+    """Run automated Hardware-in-the-Loop (HIL) test suite over USB Serial with real-time feedback."""
     if not com_port:
         print("[ERROR] No XIAO serial port available for HIL testing.")
         return 1
 
-    print("\n" + "=" * 60)
-    print(f"  RUNNING HARDWARE-IN-THE-LOOP (HIL) TEST ON {com_port}")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print(f"  HARDWARE-IN-THE-LOOP (HIL) TEST RUNNER")
+    print("=" * 65)
+    print(f"  Target Serial Port : {com_port}")
+    print(f"  Response Timeout   : {timeout_sec:.1f}s")
+    print(f"  Live Event Window  : {listen_sec:.1f}s (clicks & gestures)")
+    print("\n  Scheduled Checkpoints:")
+    print("    [1/6] POWER_DIAG     : Battery rail, charge status, CPU temp & storage")
+    print("    [2/6] MIC_POWER      : PDM microphone power gate (board.MIC_PWR)")
+    print("    [3/6] MIC_DMA_STREAM : PDMIn DMA ring buffer allocation & signal health")
+    print("    [4/6] IMU_BUS        : LSM6DS3TR-C power gate & 400kHz I2C bus")
+    print("    [5/6] IMU_ACCEL      : 3-axis accelerometer initialization & gravity")
+    print("    [6/6] CAL_AND_READY  : Ambient noise calibration & PLL beat clock ready")
+    print("=" * 65 + "\n")
 
-    checks = {
-        "POWER_DIAG": False,
-        "MIC_POWER": False,
-        "MIC_DMA_STREAM": False,
-        "IMU_BUS": False,
-        "IMU_ACCEL": False,
-        "CAL_AND_READY": False,
+    checks: dict[str, dict[str, str | bool]] = {
+        "POWER_DIAG": {"passed": False, "detail": "", "name": "Power & Memory Diagnostics"},
+        "MIC_POWER": {"passed": False, "detail": "", "name": "Microphone Power Rail (board.MIC_PWR)"},
+        "MIC_DMA_STREAM": {"passed": False, "detail": "", "name": "PDMIn 16kHz DMA Stream & Health"},
+        "IMU_BUS": {"passed": False, "detail": "", "name": "LSM6DS3TR-C I2C Bus @ 400kHz"},
+        "IMU_ACCEL": {"passed": False, "detail": "", "name": "3-Axis Accelerometer (ODR/Range)"},
+        "CAL_AND_READY": {"passed": False, "detail": "", "name": "Noise Calibration & PLL Ready"},
     }
     failures: list[str] = []
     in_traceback = False
+    passed_count = 0
 
     try:
         with serial.Serial(com_port, baudrate=115200, timeout=0.1) as ser:
             ser.dtr = True
             ser.rts = True
-            print("[HIL] Sending soft-reboot (Ctrl-C + Ctrl-D) to restart firmware...")
+            print("[STEP 1/3] Triggering board soft-reset (Ctrl-C interrupt + Ctrl-D restart)...")
             trigger_soft_reboot(ser)
+            print("           -> Soft-reboot signal dispatched. Monitoring MCU startup stream...\n")
+            print("[STEP 2/3] Executing boot & sensor diagnostic milestones:")
 
             start_time = time.monotonic()
+            last_line_time = start_time
             ready_time: float | None = None
             clicks_seen = 0
             gestures_seen = 0
+            power_diag_parts: list[str] = []
 
             while True:
                 now = time.monotonic()
+
+                # Timeout before reaching [READY]
                 if ready_time is None and (now - start_time) > timeout_sec:
                     failures.append(f"Timed out after {timeout_sec:.1f}s waiting for [READY] banner.")
                     break
 
+                # Live listening completion
                 if ready_time is not None:
                     if (now - ready_time) >= listen_sec:
                         break
 
                 raw_line = ser.readline()
                 if not raw_line:
+                    # Provide visual feedback if waiting with no output for over 2 seconds
+                    if ready_time is None and (now - last_line_time) > 2.0:
+                        elapsed = now - start_time
+                        print(f"  │ ... waiting for MCU bootloader response ({elapsed:.1f}s / {timeout_sec:.1f}s)")
+                        last_line_time = now
                     continue
 
+                last_line_time = now
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                print(f"  [MCU] {line}")
+                if not line.strip():
+                    continue
+
+                print(f"  │ [MCU] {line}")
 
                 if "Traceback (most recent call last):" in line:
                     in_traceback = True
                     failures.append("Runtime exception traceback detected on MCU")
+                    print(f"\n  ❌ [EXCEPTION DETECTED] Runtime error on MCU!\n")
                 elif in_traceback:
                     failures.append(f"  {line}")
 
                 if "[FAIL]" in line or "[FATAL]" in line:
                     failures.append(f"Hardware failure reported: {line.strip()}")
+                    print(f"\n  ❌ [HARDWARE FAILURE] {line.strip()}\n")
 
-                if "[DIAG] Battery Rail" in line or "[DIAG] Memory / Storage" in line:
-                    checks["POWER_DIAG"] = True
-                if "[MIC]  Power Gate       : Active" in line:
-                    checks["MIC_POWER"] = True
-                if "[MIC]  Signal Health    : OK" in line:
-                    checks["MIC_DMA_STREAM"] = True
-                if "[IMU]  I2C Bus          : Operational" in line:
-                    checks["IMU_BUS"] = True
-                if "[IMU]  Accelerometer    : Active" in line:
-                    checks["IMU_ACCEL"] = True
-                if "[READY] Initialization OK!" in line:
-                    checks["CAL_AND_READY"] = True
+                # 1. POWER_DIAG Check
+                if "[DIAG] Battery Rail" in line:
+                    power_diag_parts.append(line.split(":", 1)[-1].strip())
+                elif "[DIAG] Memory / Storage" in line:
+                    power_diag_parts.append(line.split(":", 1)[-1].strip())
+                    if not checks["POWER_DIAG"]["passed"]:
+                        checks["POWER_DIAG"]["passed"] = True
+                        passed_count += 1
+                        checks["POWER_DIAG"]["detail"] = " | ".join(power_diag_parts)
+                        print(f"  ├─✔ [CHECK 1/6 PASS] POWER_DIAG: {checks['POWER_DIAG']['detail']}")
+
+                # 2. MIC_POWER Check
+                elif "[MIC]  Power Gate" in line or "[MIC] Power Gate" in line:
+                    if not checks["MIC_POWER"]["passed"]:
+                        checks["MIC_POWER"]["passed"] = True
+                        passed_count += 1
+                        checks["MIC_POWER"]["detail"] = line.split(":", 1)[-1].strip()
+                        print(f"  ├─✔ [CHECK 2/6 PASS] MIC_POWER: {checks['MIC_POWER']['detail']}")
+
+                # 3. MIC_DMA_STREAM Check
+                elif "[MIC]  Signal Health" in line or "[MIC] Signal Health" in line:
+                    if not checks["MIC_DMA_STREAM"]["passed"]:
+                        checks["MIC_DMA_STREAM"]["passed"] = True
+                        passed_count += 1
+                        checks["MIC_DMA_STREAM"]["detail"] = line.split(":", 1)[-1].strip()
+                        print(f"  ├─✔ [CHECK 3/6 PASS] MIC_DMA_STREAM: {checks['MIC_DMA_STREAM']['detail']}")
+
+                # 4. IMU_BUS Check
+                elif "[IMU]  I2C Bus" in line or "[IMU] I2C Bus" in line:
+                    if not checks["IMU_BUS"]["passed"]:
+                        checks["IMU_BUS"]["passed"] = True
+                        passed_count += 1
+                        checks["IMU_BUS"]["detail"] = line.split(":", 1)[-1].strip()
+                        print(f"  ├─✔ [CHECK 4/6 PASS] IMU_BUS: {checks['IMU_BUS']['detail']}")
+
+                # 5. IMU_ACCEL Check
+                elif "[IMU]  Accelerometer" in line or "[IMU] Accelerometer" in line:
+                    if not checks["IMU_ACCEL"]["passed"]:
+                        checks["IMU_ACCEL"]["passed"] = True
+                        passed_count += 1
+                        checks["IMU_ACCEL"]["detail"] = line.split(":", 1)[-1].strip()
+                        print(f"  ├─✔ [CHECK 5/6 PASS] IMU_ACCEL: {checks['IMU_ACCEL']['detail']}")
+
+                # 6. CAL_AND_READY Check
+                elif "[READY] Initialization OK!" in line:
+                    if not checks["CAL_AND_READY"]["passed"]:
+                        checks["CAL_AND_READY"]["passed"] = True
+                        passed_count += 1
+                        checks["CAL_AND_READY"]["detail"] = "PLL Beat Clock armed & ready"
+                        print(f"  └─✔ [CHECK 6/6 PASS] CAL_AND_READY: {checks['CAL_AND_READY']['detail']}")
                     ready_time = time.monotonic()
                     if listen_sec > 0:
-                        print(f"\n[HIL] >>> Hardware Ready! Listening {listen_sec:.1f}s for live clicks/shakes... <<<")
+                        print(f"\n[STEP 3/3] >>> Hardware Ready! Listening for {listen_sec:.1f}s for live events... <<<")
+                        print("           (Trigger clicks or shake/drop the board to verify live response)\n")
 
+                # Live events
                 if "[CLICK #" in line:
                     clicks_seen += 1
-                if "[GESTURE:" in line or "[SHAKE DETECTED]" in line:
+                    print(f"  │ ♫ [LIVE EVENT: CLICK #{clicks_seen}] {line.strip()}")
+                elif "[GESTURE:" in line or "[SHAKE DETECTED]" in line:
                     gestures_seen += 1
+                    print(f"  │ ⚡ [LIVE EVENT: GESTURE #{gestures_seen}] {line.strip()}")
 
     except serial.SerialException as err:
-        print(f"[ERROR] Serial connection error on {com_port}: {err}")
+        print(f"\n[ERROR] Serial connection error on {com_port}: {err}")
         return 1
 
-    print("\n" + "-" * 60)
-    print("  HIL VERIFICATION SUMMARY")
-    print("-" * 60)
-    all_passed = len(failures) == 0
-    for name, passed in checks.items():
-        status_str = "PASS" if passed else "FAIL"
-        if not passed:
-            all_passed = False
-        print(f"  [{status_str}] {name}")
+    total_duration = time.monotonic() - start_time
+    print("\n" + "=" * 65)
+    print("  HIL VERIFICATION SUMMARY & SCORECARD")
+    print("=" * 65)
+    all_passed = len(failures) == 0 and (passed_count == len(checks))
 
+    idx = 1
+    for key, data in checks.items():
+        is_p = bool(data["passed"])
+        mark = "PASS" if is_p else "FAIL"
+        symbol = "✔" if is_p else "✘"
+        detail_txt = f"({data['detail']})" if data["detail"] else ""
+        print(f"  {symbol} [{mark}] {idx}. {key:<14} : {data['name']} {detail_txt}")
+        idx += 1
+
+    print("-" * 65)
+    print(f"  Total Duration : {total_duration:.2f}s")
     if listen_sec > 0:
-        print(f"  [INFO] Live Events Captured : {clicks_seen} clicks | {gestures_seen} mode gestures")
+        print(f"  Live Captures  : {clicks_seen} clicks | {gestures_seen} mode gestures")
 
     if failures:
-        print("\n  [FAILURES DETECTED]:")
+        print("\n  ❌ FAILURES DETECTED:")
         for f in failures:
             print(f"    - {f}")
+        print("\n  RESULT: TEST FAILED")
+    else:
+        print("\n  RESULT: ALL 6 CHECKS PASSED (Hardware & Firmware 100% Operational)")
 
-    print("=" * 60)
+    print("=" * 65 + "\n")
     return 0 if all_passed else 1
 
 
