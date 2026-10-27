@@ -237,9 +237,10 @@ class ModeEngine:
         if the internal clock already fired this beat autonomously, adjusts the PLL phase
         and period without double-flashing.
         """
-        # 1. Check for long pause reset
-        if self.last_click_time is not None and (now - self.last_click_time) > self.pause_reset_sec:
-            self.reset_clock()
+        # 1. Check for long pause reset if unlocked
+        if not self.is_locked:
+            if self.last_click_time is not None and (now - self.last_click_time) > self.pause_reset_sec:
+                self.reset_clock()
 
         measured_dt = (now - self.last_click_time) if self.last_click_time is not None else None
         self.last_click_time = now
@@ -277,10 +278,11 @@ class ModeEngine:
             return self._emit_beat(now)
 
         # 4. Locked PLL state: compare click timestamp against internal clock beats
-        # Check if the internal clock already fired this beat recently via get_due_flashes()
+        # Check if click aligns with recent beat (within 40% of period)
         if self.last_beat_time is not None and abs(now - self.last_beat_time) < (0.40 * self.period):
             phase_err = now - self.last_beat_time
-            self._update_period_from_interval(measured_dt)
+            if measured_dt is not None and measured_dt < (self.period * 2.5):
+                self._update_period_from_interval(measured_dt)
             corrected_beat = self.last_beat_time + (self.phase_gain * phase_err)
             self.last_beat_time = corrected_beat
             self.next_beat_time = corrected_beat + self.period
@@ -290,21 +292,21 @@ class ModeEngine:
         # Check if click aligns with the upcoming scheduled `next_beat_time`
         if self.next_beat_time is not None and abs(now - self.next_beat_time) < (0.40 * self.period):
             phase_err = now - self.next_beat_time
-            self._update_period_from_interval(measured_dt)
+            if measured_dt is not None and measured_dt < (self.period * 2.5):
+                self._update_period_from_interval(measured_dt)
             corrected_beat = self.next_beat_time + (self.phase_gain * phase_err)
             flashes = self._emit_beat(corrected_beat)
             self.next_beat_time = corrected_beat + self.period
             return flashes
 
-        # Otherwise, tempo changed significantly: drop lock until confirmed at new tempo
-        self.is_locked = False
-        if 0.20 <= measured_dt <= 2.0:
-            self.period = measured_dt
-            self._lock_intervals = 1
-        else:
-            self._lock_intervals = 0
+        # Sound returned after silence, or out-of-phase:
+        # Snap PLL phase directly to this click! In meter modes, align to Beat 1 (downbeat)
+        self.last_beat_time = now
+        self.next_beat_time = now + self.period
+        self._scheduled_flashes.clear()
+        if self.current_mode in (MetronomeMode.METER_4_4, MetronomeMode.METER_3_4):
+            self.beat_count = 0  # _emit_beat will increment to 1 (Green accent)
         flashes = self._emit_beat(now)
-        self.next_beat_time = None
         return flashes
 
     def _update_period_from_interval(self, measured_dt: float) -> None:
@@ -322,19 +324,12 @@ class ModeEngine:
         """Advance the autonomous internal beat clock and return any flashes due at or before `now`."""
         due: list[FlashEvent] = []
 
-        # 1. Autonomous internal PLL beat generation
+        # 1. Autonomous internal PLL beat generation (Continuous Freewheeling / Flywheel)
         if self.is_locked and self.next_beat_time is not None and now >= self.next_beat_time:
-            # Check if clicks stopped completely (exceeded pause_reset_sec or max_coast_beats)
-            if (
-                self.last_click_time is not None
-                and (now - self.last_click_time) > self.pause_reset_sec
-            ) or self.coasted_beats >= self.max_coast_beats:
-                self.reset_clock()
-            else:
-                beat_t = self.next_beat_time
-                self.coasted_beats += 1
-                self.next_beat_time = beat_t + self.period
-                due.extend(self._emit_beat(beat_t))
+            beat_t = self.next_beat_time
+            self.coasted_beats += 1
+            self.next_beat_time = beat_t + self.period
+            due.extend(self._emit_beat(beat_t))
 
         # 2. Scheduled upbeat flashes
         remaining: list[FlashEvent] = []

@@ -135,6 +135,34 @@ def test_meter_resets_beat_count_after_pause():
     assert after_pause[0].beat_num == 1
 
 
+def test_pll_continuous_freewheeling_and_resync_after_sound_pause():
+    """Verify internal clock continues flashing indefinitely after sound stops and resyncs when clicks return."""
+    engine = ModeEngine(initial_mode=MetronomeMode.METER_4_4)
+    # Lock the PLL with 3 steady clicks at 120 BPM (0.5s period)
+    engine.on_click(now=1.0, ioi=0.5)
+    engine.on_click(now=1.5, ioi=0.5)
+    engine.on_click(now=2.0, ioi=0.5)
+    assert engine.is_locked is True
+
+    # Clicks STOP completely! Freewheel for 10 beats (5.0s of silence)
+    flashes = []
+    t = 2.0
+    for _ in range(10):
+        t += 0.5
+        flashes.extend(engine.get_due_flashes(now=t))
+    assert len(flashes) == 10
+    # Still locked and running at 120 BPM!
+    assert engine.is_locked is True
+
+    # Acoustic click resumes at t=7.3s (late click, start of new phrase)
+    # Resync snaps phase and starts on Beat 1 (Green accent)
+    resync_flashes = engine.on_click(now=7.3, ioi=0.5)
+    assert len(resync_flashes) == 1
+    assert resync_flashes[0].color == "GREEN"
+    assert resync_flashes[0].beat_num == 1
+    assert engine.is_locked is True
+
+
 def test_pll_internal_clock_fires_on_schedule_and_filters_jitter():
     """Verify internal PLL clock dims until locked (3 clicks / 2 intervals), fires on schedule, and filters jitter."""
     engine = ModeEngine(initial_mode=MetronomeMode.ON_BEAT)

@@ -759,9 +759,9 @@ class CircuitModeEngine:
             lvl = BRIGHTNESS_FULL if self.is_locked else BRIGHTNESS_DIM_UNLOCKED
             immediate.append(("RED", self.beat_count, False, lvl))
         elif self.current_mode == MetronomeMode.UPBEAT:
-            immediate.append(("ANCHOR", self.beat_count, False))
+            lvl = BRIGHTNESS_FULL if self.is_locked else BRIGHTNESS_DIM_UNLOCKED
+            immediate.append(("ANCHOR", self.beat_count, False, lvl))
             if self.period > 0:
-                lvl = BRIGHTNESS_FULL if self.is_locked else BRIGHTNESS_DIM_UNLOCKED
                 self.scheduled_flashes.append((beat_time + (self.period / 2.0), ("BLUE", self.beat_count, True, lvl)))
         elif self.current_mode in (MetronomeMode.METER_4_4, MetronomeMode.METER_3_4):
             if self.beat_count == 1:
@@ -787,8 +787,10 @@ class CircuitModeEngine:
 
         Returns (immediate_events, phase_error_ms).
         """
-        if self.last_click_time is not None and (onset_time - self.last_click_time) > self.pause_reset_sec:
-            self.reset_clock()
+        # If unlocked and silence exceeded pause_reset_sec, reset beat count
+        if not self.is_locked:
+            if self.last_click_time is not None and (onset_time - self.last_click_time) > self.pause_reset_sec:
+                self.reset_clock()
 
         measured_dt = (onset_time - self.last_click_time) if self.last_click_time is not None else None
         self.last_click_time = onset_time
@@ -823,10 +825,12 @@ class CircuitModeEngine:
                     self.period = ioi
             return self._emit_beat(onset_time), 0.0
 
-        # Locked PLL state: check if internal clock already fired this beat
+        # Locked PLL state:
+        # 1. Aligns with recent beat:
         if self.last_beat_time is not None and abs(onset_time - self.last_beat_time) < (0.40 * self.period):
             phase_err = onset_time - self.last_beat_time
-            self._update_period_from_interval(measured_dt)
+            if measured_dt is not None and measured_dt < (self.period * 2.5):
+                self._update_period_from_interval(measured_dt)
             corrected_beat = self.last_beat_time + (self.phase_gain * phase_err)
             self.last_beat_time = corrected_beat
             self.next_beat_time = corrected_beat + self.period
@@ -835,24 +839,24 @@ class CircuitModeEngine:
                 self.scheduled_flashes[-1] = (corrected_beat + (self.period / 2.0), event)
             return [], (phase_err * 1000.0)
 
-        # Check if click arrived slightly ahead of upcoming next_beat_time
+        # 2. Aligns with upcoming beat:
         if self.next_beat_time is not None and abs(onset_time - self.next_beat_time) < (0.40 * self.period):
             phase_err = onset_time - self.next_beat_time
-            self._update_period_from_interval(measured_dt)
+            if measured_dt is not None and measured_dt < (self.period * 2.5):
+                self._update_period_from_interval(measured_dt)
             corrected_beat = self.next_beat_time + (self.phase_gain * phase_err)
             flashes = self._emit_beat(corrected_beat)
             self.next_beat_time = corrected_beat + self.period
             return flashes, (phase_err * 1000.0)
 
-        # Tempo changed significantly: drop lock until confirmed at new tempo
-        self.is_locked = False
-        if 0.20 <= measured_dt <= 2.0:
-            self.period = measured_dt
-            self._lock_intervals = 1
-        else:
-            self._lock_intervals = 0
+        # 3. Sound resumed after silence, or out-of-phase:
+        # Snap PLL phase directly to this click! In meter modes, align to Beat 1 (downbeat)
+        self.last_beat_time = onset_time
+        self.next_beat_time = onset_time + self.period
+        self.scheduled_flashes.clear()
+        if self.current_mode in (MetronomeMode.METER_4_4, MetronomeMode.METER_3_4):
+            self.beat_count = 0  # _emit_beat will increment to 1 (Green accent)
         flashes = self._emit_beat(onset_time)
-        self.next_beat_time = None
         return flashes, 0.0
 
     def get_due_flashes(self, now: float) -> list[tuple[str, int, bool, float]]:
@@ -860,16 +864,10 @@ class CircuitModeEngine:
         due = []
 
         if self.is_locked and self.next_beat_time is not None and now >= self.next_beat_time:
-            if (
-                self.last_click_time is not None
-                and (now - self.last_click_time) > self.pause_reset_sec
-            ) or self.coasted_beats >= self.max_coast_beats:
-                self.reset_clock()
-            else:
-                beat_t = self.next_beat_time
-                self.coasted_beats += 1
-                self.next_beat_time = beat_t + self.period
-                due.extend(self._emit_beat(beat_t))
+            beat_t = self.next_beat_time
+            self.coasted_beats += 1
+            self.next_beat_time = beat_t + self.period
+            due.extend(self._emit_beat(beat_t))
 
         remaining = []
         for target_time, event in self.scheduled_flashes:
@@ -1050,7 +1048,12 @@ def _trigger_led_colors(
     """Turn on appropriate visual feedback across onboard RGB and NeoPixel stick."""
     if not events:
         return False, 0.0
-    color_tag, beat_num, is_upbeat, lvl = events[0]
+    ev = events[0]
+    if len(ev) >= 4:
+        color_tag, beat_num, is_upbeat, lvl = ev[:4]
+    else:
+        color_tag, beat_num, is_upbeat = ev[:3]
+        lvl = BRIGHTNESS_FULL
     leds.show_beat(current_mode, beat_num, color_tag, is_upbeat)
     if lvl >= 0.8:
         pulse_dur = LED_FLASH_SEC

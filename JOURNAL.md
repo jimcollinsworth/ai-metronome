@@ -4,6 +4,34 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-27 — Continuous Freewheeling (Flywheel) Mode & Mode 2 Tuple Unpack Fix
+
+> [!NOTE] User Instructions & Guidance:
+> - *"ooh, new feature, i want the metronome to continue flashing even after sound stops, the proper timing continues until another sound is heard to resync with"*
+> - *"crashed after i switched to mode 2 and then manually did a few click sounds"*
+> - *"perfect, do the enhancement and bug fix then deploy"*
+
+### ADR 014: Continuous Freewheeling (Flywheel) Metronome & Mode 2 Downbeat Tuple Fix
+- **Context**: The user requested that the metronome continue flashing at tempo after clicks stop, acting as an autonomous visual conductor until acoustic sound returns to resynchronize with. Previously, `CircuitModeEngine` reset the clock after 2.0s of silence or 3 coasted beats (`max_coast_beats = 3`). Additionally, switching to Mode 2 (Upbeat) caused a runtime crash (`ValueError: need more than 3 values to unpack`) when a click occurred because the immediate `"ANCHOR"` event was appended as a 3-tuple instead of a 4-tuple with brightness level.
+- **Decision & Implementation**:
+  1. **Continuous Freewheeling (Flywheel) Metronome**:
+     - Removed the 3-beat coast limit and silence cutoff from `get_due_flashes()` in both `CircuitModeEngine` and `ModeEngine`.
+     - Once the PLL locks onto tempo, the internal clock continues generating steady beats indefinitely at `self.period`.
+     - In `main()`, `last_activity_time` is kept fresh while the locked beat clock is actively flashing, with a generous 180s (3-minute) silence guard to protect the battery if left unattended.
+  2. **Phase & Meter Downbeat Resynchronization**:
+     - In `on_click()`, when a physical click returns after silence or out-of-phase:
+       - Rather than unlocking or resetting, the PLL snaps `last_beat_time` directly to `onset_time` and schedules `next_beat_time = onset_time + period`.
+       - In meter modes (Modes 3 & 4), resets `beat_count = 0` so the returning click immediately emits Beat 1 (the Green downbeat accent).
+  3. **Mode 2 Tuple Unpacking Fix**:
+     - Fixed `_emit_beat()` in `CircuitModeEngine` to emit a 4-tuple `("ANCHOR", self.beat_count, False, lvl)`.
+     - Added defensive slicing in `_trigger_led_colors()` to unpack 3-tuples or 4-tuples cleanly without raising `ValueError`.
+  4. **Verification**:
+     - Added unit test `test_pll_continuous_freewheeling_and_resync_after_sound_pause` in `tests/test_mode_engine.py` (15/15 Python unit tests passing).
+     - Verified all 7 host Rust unit tests pass.
+     - Deployed to device (`CIRCUITPY`), passed all 6 hardware HIL checkpoints in 2.48s, and verified Mode 2 cycling on physical hardware.
+
+---
+
 ## 2026-10-27 — Interactive CLI Serial Monitor & Gesture Threshold Responsiveness
 
 > [!NOTE] User Instructions & Guidance:
