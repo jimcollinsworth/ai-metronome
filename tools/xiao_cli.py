@@ -1,8 +1,9 @@
-"""Hardware-in-the-Loop (HIL) & Rust UF2 CLI for Seeed Studio XIAO nRF52840 Sense.
+"""Rust Firmware Build, Flash, Monitor & HIL CLI for Seeed Studio XIAO nRF52840 Sense.
 
-Provides automated CircuitPython & Rust deployment (`deploy`, `rust-build`, `rust-deploy`),
-pure-Python ELF32-to-UF2 conversion (`0xADA52840`), hardware status discovery (`status`),
-soft-reset (`reset`), live serial monitoring (`monitor`), and automated on-device HIL testing (`hil-test`).
+Provides deterministic Rust-first commands (`build`, `deploy`, `test`, `monitor`, `reset`, `status`)
+and pure-Python ELF32-to-UF2 packaging (`0xADA52840` @ `0x00027000`).
+
+(CircuitPython prototype recovery is isolated in `tools/restore_circuitpython.py`.)
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ import serial
 from serial.tools import list_ports
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_FIRMWARE_PATH = REPO_ROOT / "src" / "xiao_nrf52840_sense" / "circuitpython" / "code.py"
 RUST_MANIFEST_PATH = REPO_ROOT / "src" / "xiao_nrf52840_sense" / "rust" / "Cargo.toml"
 RUST_ELF_PATH = (
     REPO_ROOT
@@ -33,19 +33,18 @@ RUST_ELF_PATH = (
     / "release"
     / "ai-metronome-rust"
 )
+SMOKE_TEST_ELF_PATH = (
+    REPO_ROOT
+    / "src"
+    / "xiao_nrf52840_sense"
+    / "rust"
+    / "target"
+    / "thumbv7em-none-eabihf"
+    / "release"
+    / "deploy-test"
+)
 DEFAULT_UF2_OUTPUT_PATH = REPO_ROOT / "build" / "ai-metronome-rust.uf2"
-DEFAULT_CIRCUITPYTHON_URL = (
-    "https://adafruit-circuit-python.s3.amazonaws.com/bin/Seeed_XIAO_nRF52840_Sense/en_US/"
-    "adafruit-circuitpython-Seeed_XIAO_nRF52840_Sense-en_US-9.2.4.uf2"
-)
-DEFAULT_CIRCUITPYTHON_WITH_SD_UF2_PATH = (
-    REPO_ROOT / "build" / "circuitpython-with-softdevice-xiao-sense.uf2"
-)
-DEFAULT_CIRCUITPYTHON_UF2_PATH = (
-    DEFAULT_CIRCUITPYTHON_WITH_SD_UF2_PATH
-    if DEFAULT_CIRCUITPYTHON_WITH_SD_UF2_PATH.exists()
-    else REPO_ROOT / "build" / "adafruit-circuitpython-Seeed_XIAO_nRF52840_Sense-en_US-9.2.4.uf2"
-)
+SMOKE_TEST_UF2_OUTPUT_PATH = REPO_ROOT / "build" / "deploy-test.uf2"
 
 # UF2 Constants for Nordic nRF52840 (Adafruit UF2 Bootloader)
 UF2_MAGIC_START0 = 0x0A324655  # "UF2\n"
@@ -54,13 +53,13 @@ UF2_MAGIC_END = 0x0AB16F30
 UF2_FLAG_FAMILY_ID_PRESENT = 0x00002000
 NRF52840_UF2_FAMILY_ID = 0xADA52840
 
-# Known USB Vendor IDs for Seeed Studio (0x2886) and Adafruit CircuitPython (0x239A)
+# Known USB Vendor IDs for Seeed Studio (0x2886) and Adafruit (0x239A)
 XIAO_VIDS = {0x2886, 0x239A}
 
 
 @dataclass
 class XiaoDeviceInfo:
-    """Discovered XIAO nRF52840 Sense mount & serial port endpoints."""
+    """Discovered XIAO nRF52840 Sense USB drive & CDC serial port endpoints."""
 
     drive_path: Path | None
     volume_label: str | None
@@ -96,13 +95,13 @@ def _get_volume_label(drive_root: str) -> str | None:
     return vol_name_buf.value
 
 
-def find_circuitpy_drive(explicit_drive: str | None = None) -> tuple[Path | None, str | None, str | None]:
-    """Locate the mounted CIRCUITPY (or XIAO-SENSE bootloader) USB drive."""
+def find_xiao_drive(explicit_drive: str | None = None) -> tuple[Path | None, str | None, str | None]:
+    """Locate the mounted XIAO-SENSE bootloader drive (or CIRCUITPY drive if present)."""
     if explicit_drive:
         path = Path(explicit_drive)
         if path.exists():
             label = _get_volume_label(str(path.resolve().anchor)) or "SPECIFIED"
-            info_file = path / "boot_out.txt" if (path / "boot_out.txt").exists() else (path / "INFO_UF2.TXT")
+            info_file = path / "INFO_UF2.TXT" if (path / "INFO_UF2.TXT").exists() else (path / "boot_out.txt")
             boot_txt = info_file.read_text(encoding="utf-8", errors="replace").strip() if info_file.exists() else None
             return path, label, boot_txt
         return None, None, None
@@ -113,20 +112,20 @@ def find_circuitpy_drive(explicit_drive: str | None = None) -> tuple[Path | None
         if not path.exists():
             continue
         label = _get_volume_label(root)
-        if label and label.upper() in ("CIRCUITPY", "XIAO-SENSE"):
-            info_file = path / "boot_out.txt" if (path / "boot_out.txt").exists() else (path / "INFO_UF2.TXT")
+        if label and label.upper() in ("XIAO-SENSE", "CIRCUITPY"):
+            info_file = path / "INFO_UF2.TXT" if (path / "INFO_UF2.TXT").exists() else (path / "boot_out.txt")
             boot_txt = info_file.read_text(encoding="utf-8", errors="replace").strip() if info_file.exists() else None
             return path, label, boot_txt
-        if (path / "boot_out.txt").exists():
-            boot_txt = (path / "boot_out.txt").read_text(encoding="utf-8", errors="replace").strip()
-            if "Seeed" in boot_txt or "XIAO" in boot_txt or "nRF52840" in boot_txt or "CircuitPython" in boot_txt:
-                return path, label or "CIRCUITPY", boot_txt
         if (path / "INFO_UF2.TXT").exists():
             boot_txt = (path / "INFO_UF2.TXT").read_text(encoding="utf-8", errors="replace").strip()
             if "XIAO" in boot_txt or "nRF52840" in boot_txt or "UF2 Bootloader" in boot_txt:
                 return path, label or "XIAO-SENSE", boot_txt
 
     return None, None, None
+
+
+# Alias kept for backward compatibility with tests/utilities
+find_circuitpy_drive = find_xiao_drive
 
 
 def find_xiao_serial_port(explicit_port: str | None = None) -> tuple[str | None, str | None, str | None]:
@@ -140,19 +139,17 @@ def find_xiao_serial_port(explicit_port: str | None = None) -> tuple[str | None,
                 return p.device, p.description, vid_pid
         return explicit_port, "Manual Port", None
 
-    # 1. Exact VID match (Seeed 0x2886 or Adafruit CircuitPython 0x239A)
     for p in ports:
         if p.vid in XIAO_VIDS:
             vid_pid = f"{p.vid:04X}:{p.pid:04X}"
             return p.device, p.description, vid_pid
 
-    # 2. Fallback: Any USB serial port that is NOT Intel AMT SOL
     for p in ports:
         desc_upper = (p.description or "").upper()
         hwid_upper = (p.hwid or "").upper()
         if "ACTIVE MANAGEMENT TECHNOLOGY" in desc_upper or "VEN_8086" in hwid_upper:
             continue
-        if "USB" in hwid_upper or "CIRCUITPYTHON" in desc_upper or "SERIAL" in desc_upper:
+        if "USB" in hwid_upper or "SERIAL" in desc_upper:
             vid_pid = f"{p.vid:04X}:{p.pid:04X}" if p.vid and p.pid else p.hwid
             return p.device, p.description, vid_pid
 
@@ -161,7 +158,7 @@ def find_xiao_serial_port(explicit_port: str | None = None) -> tuple[str | None,
 
 def discover_device(drive: str | None = None, port: str | None = None) -> XiaoDeviceInfo:
     """Discover both USB storage drive and USB CDC serial port for XIAO."""
-    drive_path, label, boot_out = find_circuitpy_drive(drive)
+    drive_path, label, boot_out = find_xiao_drive(drive)
     com_port, desc, vid_pid = find_xiao_serial_port(port)
     return XiaoDeviceInfo(
         drive_path=drive_path,
@@ -198,12 +195,13 @@ def elf_to_uf2(
         p_type, p_offset, _p_vaddr, p_paddr, p_filesz, _p_memsz, _p_flags, _p_align = struct.unpack_from(
             "<IIIIIIII", data, off
         )
-        # Application flash starts at 0x00001000 (when SoftDevice is absent) or
-        # 0x00027000 (with SoftDevice S140), and ends before 0x000ED000.
-        # Filter out ELF file header segments that LLD places at address 0x00000000.
         if p_type == 1 and p_filesz > 0 and 0x00001000 <= p_paddr < 0x000ED000:
             seg_bytes = data[p_offset : p_offset + p_filesz]
             segments.append((p_paddr, seg_bytes))
+
+    # If the application is linked at 0x00027000, ignore any stray LLD header segment below 0x00027000
+    if any(addr >= 0x00027000 for addr, _ in segments):
+        segments = [(addr, seg) for addr, seg in segments if addr >= 0x00027000]
 
     if not segments:
         raise ValueError(f"No loadable flash PT_LOAD segments found in {elf_path}")
@@ -218,7 +216,6 @@ def elf_to_uf2(
         rel = addr - min_addr
         flat_image[rel : rel + len(seg)] = seg
 
-    # Pad to 256-byte chunk boundary
     rem = len(flat_image) % 256
     if rem != 0:
         flat_image.extend(b"\xff" * (256 - rem))
@@ -250,11 +247,110 @@ def elf_to_uf2(
     return num_blocks, min_addr, total_len
 
 
+def elf_to_ihex(elf_path: Path, hex_path: Path) -> tuple[int, int]:
+    """Convert a 32-bit ARM ELF file (`PT_LOAD` flash segments) into an Intel HEX (`.hex`) file.
+
+    Used by `adafruit-nrfutil dfu genpkg` to build official Nordic S140 DFU `.zip` packages.
+    Returns `(base_address, total_payload_bytes)`.
+    """
+    data = elf_path.read_bytes()
+    if len(data) < 52 or data[:4] != b"\x7fELF":
+        raise ValueError(f"Not a valid ELF binary: {elf_path}")
+
+    e_phoff = struct.unpack_from("<I", data, 0x1C)[0]
+    e_phentsize = struct.unpack_from("<H", data, 0x2A)[0]
+    e_phnum = struct.unpack_from("<H", data, 0x2C)[0]
+
+    segments: list[tuple[int, bytes]] = []
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type, p_offset, _p_vaddr, p_paddr, p_filesz, _p_memsz, _p_flags, _p_align = struct.unpack_from(
+            "<IIIIIIII", data, off
+        )
+        if p_type == 1 and p_filesz > 0 and 0x00001000 <= p_paddr < 0x000ED000:
+            seg_bytes = data[p_offset : p_offset + p_filesz]
+            segments.append((p_paddr, seg_bytes))
+
+    if any(addr >= 0x00027000 for addr, _ in segments):
+        segments = [(addr, seg) for addr, seg in segments if addr >= 0x00027000]
+
+    if not segments:
+        raise ValueError(f"No loadable flash PT_LOAD segments found in {elf_path}")
+
+    segments.sort(key=lambda s: s[0])
+    min_addr = segments[0][0]
+    max_addr = max(addr + len(seg) for addr, seg in segments)
+    total_len = max_addr - min_addr
+
+    def _ihex_line(rec_type: int, addr16: int, payload: bytes) -> str:
+        raw = bytes([len(payload), (addr16 >> 8) & 0xFF, addr16 & 0xFF, rec_type]) + payload
+        csum = (-sum(raw)) & 0xFF
+        return ":" + raw.hex().upper() + f"{csum:02X}\n"
+
+    lines: list[str] = []
+    curr_ext_addr: int | None = None
+    for seg_addr, seg_bytes in segments:
+        for offset in range(0, len(seg_bytes), 16):
+            chunk = seg_bytes[offset : offset + 16]
+            abs_addr = seg_addr + offset
+            ext_addr = (abs_addr >> 16) & 0xFFFF
+            if ext_addr != curr_ext_addr:
+                curr_ext_addr = ext_addr
+                lines.append(_ihex_line(0x04, 0x0000, struct.pack(">H", ext_addr)))
+            lines.append(_ihex_line(0x00, abs_addr & 0xFFFF, chunk))
+
+    lines.append(":00000001FF\n")
+    hex_path.parent.mkdir(parents=True, exist_ok=True)
+    hex_path.write_text("".join(lines), encoding="ascii")
+    return min_addr, total_len
+
+
+def build_dfu_package(hex_path: Path, zip_path: Path) -> bool:
+    """Invoke official `adafruit-nrfutil dfu genpkg` (`--dev-type 0x0052 --sd-req 0x0123`) if available."""
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    if zip_path.exists():
+        zip_path.unlink()
+    cmd = [
+        "uv",
+        "run",
+        "--with",
+        "adafruit-nrfutil",
+        "adafruit-nrfutil",
+        "dfu",
+        "genpkg",
+        "--dev-type",
+        "0x0052",
+        "--sd-req",
+        "0x0123",
+        "--application",
+        str(hex_path),
+        str(zip_path),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return res.returncode == 0 and zip_path.exists()
+
+
+def copy_uf2_blocks_flushed(uf2_path: Path, dest_uf2: Path) -> None:
+    """Write UF2 image in 512-byte blocks and flush to the USB MSC bootloader drive."""
+    import os
+
+    data = uf2_path.read_bytes()
+    try:
+        with open(dest_uf2, "wb", buffering=0) as f:
+            for offset in range(0, len(data), 512):
+                f.write(data[offset : offset + 512])
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        # UF2 bootloader immediately disconnects & jumps to app when the last block is written
+        pass
+
+
 def cmd_status(args: argparse.Namespace) -> int:
-    """Display discovered XIAO nRF52840 Sense drive and serial port status."""
+    """Display discovered XIAO nRF52840 Sense bootloader drive and serial port status."""
     info = discover_device(args.drive, args.port)
     print("=" * 60)
-    print("  XIAO nRF52840 SENSE -- DEVICE DISCOVERY STATUS")
+    print("  XIAO nRF52840 SENSE -- DEVICE STATUS (RUST WORKFLOW)")
     print("=" * 60)
 
     if info.drive_path:
@@ -262,65 +358,29 @@ def cmd_status(args: argparse.Namespace) -> int:
         if info.boot_out:
             for line in info.boot_out.splitlines():
                 print(f"  [INFO]    {line}")
-        code_file = info.drive_path / "code.py"
-        if code_file.exists():
-            print(f"  [CODE.PY] Present ({code_file.stat().st_size} bytes)")
     else:
-        print("  [DRIVE]   NOT FOUND (Note: Native Rust firmware does not mount CIRCUITPY)")
+        print("  [DRIVE]   No UF2 drive mounted (Normal when running Rust firmware)")
 
     if info.com_port:
         print(f"  [SERIAL]  Port       : {info.com_port} ({info.port_description}) [{info.usb_vid_pid}]")
     else:
-        print("  [SERIAL]  NOT FOUND (No XIAO USB CDC serial port detected)")
+        print("  [SERIAL]  NOT FOUND (Double-tap Reset on XIAO to enter UF2 bootloader)")
 
     print("=" * 60)
     return 0 if (info.drive_path or info.com_port) else 1
 
 
-def deploy_firmware(source_path: Path, target_drive: Path) -> bool:
-    """Copy source `code.py` to `CIRCUITPY/code.py` and flush buffers."""
-    if not source_path.exists():
-        print(f"[ERROR] Source file does not exist: {source_path}")
-        return False
-
-    dest_path = target_drive / "code.py"
-    size_bytes = source_path.stat().st_size
-    print(f"\n[DEPLOY] Transferring firmware ({source_path.name}, {size_bytes} bytes)...")
-    print(f"         Source : {source_path}")
-    print(f"         Target : {dest_path}")
-    shutil.copyfile(source_path, dest_path)
-    time.sleep(1.0)
-    print("         -> Transfer complete. CircuitPython filesystem sync OK.\n")
-    return True
-
-
-def cmd_python_deploy(args: argparse.Namespace) -> int:
-    """Deploy `code.py` to the mounted CIRCUITPY drive."""
-    info = discover_device(args.drive, args.port)
-    if not info.drive_path:
-        print("[ERROR] CIRCUITPY drive not found. Plug in the XIAO nRF52840 Sense or pass --drive.")
-        return 1
-
-    if info.volume_label and info.volume_label.upper() == "XIAO-SENSE":
-        print(f"[ERROR] Board is in UF2 Bootloader mode ({info.drive_path}). Flash CircuitPython UF2 first.")
-        return 1
-
-    src = Path(args.file).resolve()
-    if not deploy_firmware(src, info.drive_path):
-        return 1
-
-    if args.test:
-        return run_hil_test(info.com_port, listen_sec=args.listen_sec, timeout_sec=args.timeout)
-    return 0
-
-
 def cmd_rust_build(args: argparse.Namespace) -> int:
     """Compile the Rust firmware (`thumbv7em-none-eabihf`) and pack a UF2 image."""
-    manifest = Path(args.manifest).resolve()
-    uf2_out = Path(args.output).resolve()
+    smoke_test = getattr(args, "smoke_test", False)
+    manifest = Path(getattr(args, "manifest", RUST_MANIFEST_PATH)).resolve()
+    default_out = SMOKE_TEST_UF2_OUTPUT_PATH if smoke_test else DEFAULT_UF2_OUTPUT_PATH
+    uf2_out = Path(getattr(args, "output", None) or default_out).resolve()
+    bin_name = "deploy-test" if smoke_test else "ai-metronome-rust"
+    elf_path = SMOKE_TEST_ELF_PATH if smoke_test else RUST_ELF_PATH
 
     print("=" * 60)
-    print("  BUILDING RUST FIRMWARE (thumbv7em-none-eabihf)")
+    print(f"  BUILDING RUST FIRMWARE: {bin_name} (thumbv7em-none-eabihf)")
     print("=" * 60)
     cmd = [
         "cargo",
@@ -330,6 +390,8 @@ def cmd_rust_build(args: argparse.Namespace) -> int:
         "--release",
         "--target",
         "thumbv7em-none-eabihf",
+        "--bin",
+        bin_name,
     ]
     print(f"[BUILD] Running: {' '.join(cmd)}")
     res = subprocess.run(cmd, check=False)
@@ -337,20 +399,36 @@ def cmd_rust_build(args: argparse.Namespace) -> int:
         print("[ERROR] Cargo build failed.")
         return res.returncode
 
-    if not RUST_ELF_PATH.exists():
-        print(f"[ERROR] Expected ELF binary not found at {RUST_ELF_PATH}")
+    if not elf_path.exists():
+        print(f"[ERROR] Expected ELF binary not found at {elf_path}")
         return 1
 
-    num_blocks, base_addr, payload_bytes = elf_to_uf2(RUST_ELF_PATH, uf2_out)
+    num_blocks, base_addr, payload_bytes = elf_to_uf2(elf_path, uf2_out)
+    hex_out = uf2_out.with_suffix(".hex")
+    zip_out = uf2_out.with_suffix(".zip")
+    elf_to_ihex(elf_path, hex_out)
+    dfu_ok = build_dfu_package(hex_out, zip_out)
     print(f"[UF2]   Packed {payload_bytes} bytes @ 0x{base_addr:08X} -> {num_blocks} UF2 blocks")
     print(f"[UF2]   Output file: {uf2_out} ({uf2_out.stat().st_size} bytes)")
+    if dfu_ok:
+        print(f"[DFU]   Official Nordic S140 DFU package: {zip_out} ({zip_out.stat().st_size} bytes)")
     print("=" * 60)
     return 0
 
 
-def trigger_1200bps_bootloader(com_port: str) -> None:
-    """Touch serial port at 1200 baud with DTR=False to enter Adafruit UF2 bootloader."""
-    print(f"[BOOTLOADER] Touching {com_port} at 1200 baud (DTR=False) to enter XIAO-SENSE UF2 mode...")
+def trigger_bootloader(com_port: str) -> None:
+    """Request XIAO-SENSE UF2 bootloader via Rust serial 'b' command or 1200-baud touch."""
+    print(f"[BOOTLOADER] Requesting XIAO-SENSE UF2 bootloader on {com_port}...")
+    try:
+        with serial.Serial(com_port, baudrate=115200, timeout=0.2) as s:
+            s.dtr = True
+            s.rts = True
+            s.write(b"b")
+            s.flush()
+            time.sleep(0.15)
+    except serial.SerialException:
+        pass
+
     try:
         s = serial.Serial(com_port, baudrate=1200, timeout=0.2)
         s.dtr = False
@@ -361,11 +439,45 @@ def trigger_1200bps_bootloader(com_port: str) -> None:
         pass
 
 
+def verify_smoke_test_serial(com_port: str, timeout_sec: float = 5.0) -> int:
+    """Verify the minimal `deploy-test` binary responds over USB CDC serial."""
+    print(f"[SMOKE_TEST] Opening {com_port} to verify deploy-test response...")
+    try:
+        with serial.Serial(com_port, baudrate=115200, timeout=0.2) as s:
+            s.dtr = True
+            s.rts = True
+            time.sleep(0.15)
+            s.write(b"r")
+            s.flush()
+            deadline = time.monotonic() + timeout_sec
+            while time.monotonic() < deadline:
+                raw = s.readline()
+                if raw:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    print(f"  [DEVICE] {line}")
+                    if "[DEPLOY_TEST]" in line:
+                        print("[SMOKE_TEST] PASS: Minimal Rust deploy-test enumerated and responded over USB CDC!")
+                        return 0
+    except serial.SerialException as err:
+        print(f"[SMOKE_TEST] FAIL: Serial error on {com_port}: {err}")
+        return 1
+    print(f"[SMOKE_TEST] FAIL: Did not receive [DEPLOY_TEST] banner within {timeout_sec:.1f}s.")
+    return 1
+
+
 def cmd_rust_deploy(args: argparse.Namespace) -> int:
     """Build (optional) and flash the Rust `.uf2` image to the XIAO-SENSE bootloader drive."""
-    uf2_path = Path(args.uf2).resolve()
-    if not args.no_build or not uf2_path.exists():
-        build_ns = argparse.Namespace(manifest=str(RUST_MANIFEST_PATH), output=str(uf2_path))
+    smoke_test = getattr(args, "smoke_test", False)
+    default_uf2 = SMOKE_TEST_UF2_OUTPUT_PATH if smoke_test else DEFAULT_UF2_OUTPUT_PATH
+    uf2_arg = getattr(args, "uf2", None)
+    uf2_path = Path(uf2_arg if uf2_arg else default_uf2).resolve()
+
+    if not getattr(args, "no_build", False) or not uf2_path.exists():
+        build_ns = argparse.Namespace(
+            manifest=str(RUST_MANIFEST_PATH),
+            output=str(uf2_path),
+            smoke_test=smoke_test,
+        )
         rc = cmd_rust_build(build_ns)
         if rc != 0:
             return rc
@@ -377,26 +489,26 @@ def cmd_rust_deploy(args: argparse.Namespace) -> int:
         bootloader_drive = info.drive_path
     else:
         if info.com_port:
-            trigger_1200bps_bootloader(info.com_port)
+            trigger_bootloader(info.com_port)
         else:
-            print("[BOOTLOADER] No serial port found. Double-tap the physical Reset button on the XIAO now...")
+            print("[BOOTLOADER] Double-click the Reset button on the XIAO to mount XIAO-SENSE...")
 
         print("[BOOTLOADER] Waiting up to 15s for XIAO-SENSE UF2 drive to mount...")
         deadline = time.monotonic() + 15.0
-        prompted_manual = False
+        prompted = False
         while time.monotonic() < deadline:
-            d_path, d_label, d_boot = find_circuitpy_drive(args.drive)
+            d_path, d_label, d_boot = find_xiao_drive(args.drive)
             if d_path and d_label and d_label.upper() == "XIAO-SENSE":
                 bootloader_drive = d_path
                 info.boot_out = d_boot
                 break
-            if not prompted_manual and (deadline - time.monotonic()) < 9.0:
-                print("  [TIP] If the drive hasn't appeared yet, double-click the XIAO Reset button...")
-                prompted_manual = True
+            if not prompted and (deadline - time.monotonic()) < 9.0:
+                print("  [TIP] Double-click the physical Reset button on the XIAO if D:\\ hasn't appeared yet...")
+                prompted = True
             time.sleep(0.4)
 
     if not bootloader_drive:
-        print("[ERROR] XIAO-SENSE UF2 bootloader drive not found. Double-tap Reset and re-run.")
+        print("[ERROR] XIAO-SENSE UF2 bootloader drive not found. Double-click Reset and re-run.")
         return 1
 
     print(f"[BOOTLOADER] Mounted at {bootloader_drive}")
@@ -404,19 +516,40 @@ def cmd_rust_deploy(args: argparse.Namespace) -> int:
         for line in info.boot_out.splitlines():
             print(f"  [INFO_UF2] {line}")
 
-    dest_uf2 = bootloader_drive / uf2_path.name
-    print(f"[FLASH] Copying {uf2_path.name} ({uf2_path.stat().st_size} bytes) -> {dest_uf2} ...")
-    try:
-        shutil.copyfile(uf2_path, dest_uf2)
-    except OSError:
-        # Windows often reports an I/O error on the final block because the UF2 bootloader
-        # immediately resets the USB device as soon as the last UF2 block is flashed.
-        pass
+    dfu_zip = uf2_path.with_suffix(".zip")
+    dfu_flashed = False
+    if getattr(args, "dfu", False) and dfu_zip.exists():
+        bl_port, _bdesc, _bvp = find_xiao_serial_port(args.port)
+        if bl_port:
+            print(f"[DFU]   Flashing {dfu_zip.name} over bootloader serial {bl_port} via adafruit-nrfutil...")
+            dfu_cmd = [
+                "uv",
+                "run",
+                "--with",
+                "adafruit-nrfutil",
+                "adafruit-nrfutil",
+                "dfu",
+                "serial",
+                "-pkg",
+                str(dfu_zip),
+                "-p",
+                bl_port,
+                "-b",
+                "115200",
+                "--singlebank",
+            ]
+            res = subprocess.run(dfu_cmd, check=False)
+            dfu_flashed = res.returncode == 0
+
+    if not dfu_flashed:
+        dest_uf2 = bootloader_drive / uf2_path.name
+        print(f"[FLASH] Writing {uf2_path.name} ({uf2_path.stat().st_size} bytes) in 512-byte UF2 blocks -> {dest_uf2} ...")
+        copy_uf2_blocks_flushed(uf2_path, dest_uf2)
 
     print("[FLASH] UF2 transfer complete! Waiting for Rust USB CDC serial port to enumerate...")
     re_port: str | None = None
     re_deadline = time.monotonic() + 10.0
-    time.sleep(1.2)
+    time.sleep(1.0)
     while time.monotonic() < re_deadline:
         port_dev, _desc, _vp = find_xiao_serial_port(args.port)
         if port_dev:
@@ -426,339 +559,184 @@ def cmd_rust_deploy(args: argparse.Namespace) -> int:
 
     if re_port:
         print(f"[SERIAL] Rust firmware enumerated on {re_port}!")
-        if args.test:
-            return run_hil_test(re_port, listen_sec=args.listen_sec, timeout_sec=args.timeout)
+        if smoke_test:
+            return verify_smoke_test_serial(re_port, timeout_sec=getattr(args, "timeout", 5.0))
+        if getattr(args, "test", False):
+            return run_hil_test(re_port, listen_sec=getattr(args, "listen_sec", 0.0), timeout_sec=getattr(args, "timeout", 10.0))
     else:
         print("[WARN] Serial port did not enumerate within 10s (check USB connection).")
-        if args.test:
+        if smoke_test or getattr(args, "test", False):
             return 1
 
     return 0
 
 
-def cmd_python_restore(args: argparse.Namespace) -> int:
-    """Flash official CircuitPython firmware UF2 to restore the CIRCUITPY filesystem and deploy code.py."""
-    uf2_path = Path(args.uf2).resolve() if getattr(args, "uf2", None) else DEFAULT_CIRCUITPYTHON_UF2_PATH
-    if not uf2_path.exists():
-        print("[DOWNLOAD] Fetching official CircuitPython 9.2.4 UF2 for Seeed XIAO nRF52840 Sense...")
-        print(f"           Source URL: {DEFAULT_CIRCUITPYTHON_URL}")
-        uf2_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            import urllib.request
-            urllib.request.urlretrieve(DEFAULT_CIRCUITPYTHON_URL, uf2_path)
-            print(f"           -> Downloaded ({uf2_path.stat().st_size} bytes) to {uf2_path}")
-        except Exception as err:
-            print(f"[ERROR] Failed to download CircuitPython UF2: {err}")
-            return 1
-
-    info = discover_device(args.drive, args.port)
-    bootloader_drive: Path | None = None
-
-    if info.drive_path and info.volume_label and info.volume_label.upper() == "XIAO-SENSE":
-        bootloader_drive = info.drive_path
-    else:
-        if info.com_port:
-            trigger_1200bps_bootloader(info.com_port)
-        else:
-            print("[BOOTLOADER] Double-tap the physical Reset button on the XIAO to enter DFU mode...")
-
-        print("[BOOTLOADER] Waiting up to 15s for XIAO-SENSE UF2 drive to mount...")
-        deadline = time.monotonic() + 15.0
-        prompted_manual = False
-        while time.monotonic() < deadline:
-            d_path, d_label, d_boot = find_circuitpy_drive(args.drive)
-            if d_path and d_label and d_label.upper() == "XIAO-SENSE":
-                bootloader_drive = d_path
-                info.boot_out = d_boot
-                break
-            if not prompted_manual and (deadline - time.monotonic()) < 9.0:
-                print("  [TIP] If the drive hasn't appeared yet, double-click the XIAO Reset button...")
-                prompted_manual = True
-            time.sleep(0.4)
-
-    if not bootloader_drive:
-        print("[ERROR] XIAO-SENSE UF2 bootloader drive not found. Double-tap Reset and re-run.")
-        return 1
-
-    print(f"[BOOTLOADER] Mounted at {bootloader_drive}")
-    dest_uf2 = bootloader_drive / uf2_path.name
-    print(f"[FLASH] Copying CircuitPython runtime ({uf2_path.name}, {uf2_path.stat().st_size} bytes) -> {dest_uf2} ...")
-    try:
-        shutil.copyfile(uf2_path, dest_uf2)
-    except OSError:
-        pass
-
-    print("[FLASH] CircuitPython runtime flashed! Waiting up to 15s for CIRCUITPY drive to mount...")
-    circuitpy_drive: Path | None = None
-    mount_deadline = time.monotonic() + 15.0
-    time.sleep(2.0)
-    while time.monotonic() < mount_deadline:
-        d_path, d_label, _ = find_circuitpy_drive(args.drive)
-        if d_path and d_label and d_label.upper() == "CIRCUITPY":
-            circuitpy_drive = d_path
-            break
-        time.sleep(0.5)
-
-    if not circuitpy_drive:
-        print("[WARN] CIRCUITPY drive did not mount within 15s. Check USB connection or double-click Reset.")
-        return 1
-
-    print(f"[SUCCESS] CIRCUITPY drive mounted at {circuitpy_drive}!")
-
-    deploy_file = Path(args.file) if hasattr(args, "file") and args.file else DEFAULT_FIRMWARE_PATH
-    deploy_ok = deploy_firmware(deploy_file, circuitpy_drive)
-    if not deploy_ok:
-        return 1
-
-    if getattr(args, "test", False):
-        time.sleep(1.5)
-        port_dev, _, _ = find_xiao_serial_port(args.port)
-        return run_hil_test(port_dev, listen_sec=getattr(args, "listen_sec", 0.0), timeout_sec=getattr(args, "timeout", 10.0))
-
-    return 0
-
-
-def trigger_soft_reboot(ser: serial.Serial) -> None:
-    """Interrupt any running script with Ctrl-C, enter REPL, and soft-reboot with Ctrl-D.
-
-    Also triggers full hardware self-test replay on the Rust firmware (`0x04` / Ctrl-D).
-    """
+def trigger_self_test_replay(ser: serial.Serial) -> None:
+    """Send 'r' (or 0x04) to replay the full hardware self-test banner on the Rust firmware."""
     ser.reset_input_buffer()
-    ser.write(b"\x03\x03")
-    ser.flush()
-    time.sleep(0.35)
-    ser.write(b"\r")
-    ser.flush()
-    time.sleep(0.20)
-    ser.reset_input_buffer()
-    ser.write(b"\x04")
+    ser.write(b"r")
     ser.flush()
 
 
 def run_hil_test(com_port: str | None, listen_sec: float = 0.0, timeout_sec: float = 10.0) -> int:
-    """Run automated Hardware-in-the-Loop (HIL) test suite over USB Serial with real-time feedback."""
+    """Run automated Hardware-in-the-Loop (HIL) verification over USB Serial."""
     if not com_port:
         print("[ERROR] No XIAO serial port available for HIL testing.")
         return 1
 
     print("\n" + "=" * 65)
-    print(f"  HARDWARE-IN-THE-LOOP (HIL) TEST RUNNER")
+    print("  HARDWARE-IN-THE-LOOP (HIL) TEST RUNNER (RUST FIRMWARE)")
     print("=" * 65)
     print(f"  Target Serial Port : {com_port}")
     print(f"  Response Timeout   : {timeout_sec:.1f}s")
-    print(f"  Live Event Window  : {listen_sec:.1f}s (clicks & gestures)")
+    print(f"  Live Event Window  : {listen_sec:.1f}s (clicks, gestures & BLE)")
     print("\n  Scheduled Checkpoints:")
-    print("    [1/6] POWER_DIAG     : Battery rail, charge status, CPU temp & storage")
-    print("    [2/6] MIC_POWER      : PDM microphone power gate (board.MIC_PWR)")
-    print("    [3/6] MIC_DMA_STREAM : PDMIn DMA ring buffer allocation & signal health")
-    print("    [4/6] IMU_BUS        : LSM6DS3TR-C power gate & 400kHz I2C bus")
-    print("    [5/6] IMU_ACCEL      : 3-axis accelerometer initialization & gravity")
-    print("    [6/6] CAL_AND_READY  : Ambient noise calibration & PLL beat clock ready")
+    print("    [1/7] POWER_DIAG     : Battery rail, charge status, CPU temp & RAM/Flash")
+    print("    [2/7] MIC_POWER      : PDM microphone power gate (P1.10 MIC_PWR)")
+    print("    [3/7] MIC_DMA_STREAM : PDM 16kHz EasyDMA stream & signal health")
+    print("    [4/7] IMU_BUS        : LSM6DS3TR-C power gate & 400kHz TWIM0 I2C bus")
+    print("    [5/7] IMU_ACCEL      : 3-axis accelerometer & gyroscope active")
+    print("    [6/7] BLE_ADVERTISER : 2.4GHz BLE 1Mbps BTHome v2 (0xFCD2) tempo broadcaster")
+    print("    [7/7] CAL_AND_READY  : Ambient noise calibration & PLL beat clock ready")
     print("=" * 65 + "\n")
 
     checks: dict[str, dict[str, str | bool]] = {
         "POWER_DIAG": {"passed": False, "detail": "", "name": "Power & Memory Diagnostics"},
-        "MIC_POWER": {"passed": False, "detail": "", "name": "Microphone Power Rail (board.MIC_PWR)"},
-        "MIC_DMA_STREAM": {"passed": False, "detail": "", "name": "PDMIn 16kHz DMA Stream & Health"},
+        "MIC_POWER": {"passed": False, "detail": "", "name": "Microphone Power Rail (P1.10 MIC_PWR)"},
+        "MIC_DMA_STREAM": {"passed": False, "detail": "", "name": "PDM 16kHz EasyDMA Stream & Health"},
         "IMU_BUS": {"passed": False, "detail": "", "name": "LSM6DS3TR-C I2C Bus @ 400kHz"},
-        "IMU_ACCEL": {"passed": False, "detail": "", "name": "3-Axis Accelerometer (ODR/Range)"},
+        "IMU_ACCEL": {"passed": False, "detail": "", "name": "3-Axis Accelerometer (WHO_AM_I=0x6A)"},
+        "BLE_ADVERTISER": {"passed": False, "detail": "", "name": "BLE Advertiser (AI-METRO BTHome 0xFCD2)"},
         "CAL_AND_READY": {"passed": False, "detail": "", "name": "Noise Calibration & PLL Ready"},
     }
     failures: list[str] = []
-    in_traceback = False
-    passed_count = 0
 
     try:
         with serial.Serial(com_port, baudrate=115200, timeout=0.1) as ser:
             ser.dtr = True
             ser.rts = True
-            print("[STEP 1/3] Triggering board soft-reset (Ctrl-C interrupt + Ctrl-D restart)...")
-            trigger_soft_reboot(ser)
-            print("           -> Soft-reboot signal dispatched. Monitoring MCU startup stream...\n")
-            print("[STEP 2/3] Executing boot & sensor diagnostic milestones:")
+            print("[STEP 1/2] Requesting hardware self-test replay ('r')...")
+            trigger_self_test_replay(ser)
 
             start_time = time.monotonic()
-            last_line_time = start_time
             ready_time: float | None = None
-            clicks_seen = 0
-            gestures_seen = 0
+            replayed_after_partial = False
             power_diag_parts: list[str] = []
 
             while True:
                 now = time.monotonic()
-
-                # Timeout before reaching [READY]
                 if ready_time is None and (now - start_time) > timeout_sec:
                     failures.append(f"Timed out after {timeout_sec:.1f}s waiting for [READY] banner.")
                     break
-
-                # Live listening completion
-                if ready_time is not None:
-                    if (now - ready_time) >= listen_sec:
-                        break
+                if ready_time is not None and (now - ready_time) >= listen_sec:
+                    break
 
                 raw_line = ser.readline()
                 if not raw_line:
-                    # Provide visual feedback if waiting with no output for over 2 seconds
-                    if ready_time is None and (now - last_line_time) > 2.0:
-                        elapsed = now - start_time
-                        print(f"  │ ... waiting for MCU bootloader response ({elapsed:.1f}s / {timeout_sec:.1f}s)")
-                        last_line_time = now
                     continue
 
-                last_line_time = now
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
                 if not line.strip():
                     continue
 
-                print(f"  │ [MCU] {line}")
+                print(f"  | [MCU] {line}")
 
-                if "Traceback (most recent call last):" in line:
-                    in_traceback = True
-                    failures.append("Runtime exception traceback detected on MCU")
-                    print(f"\n  ❌ [EXCEPTION DETECTED] Runtime error on MCU!\n")
-                elif in_traceback:
-                    failures.append(f"  {line}")
+                if "[CRASH_LOG]" in line or "[FAIL]" in line:
+                    failures.append(line.strip())
 
-                if "[FAIL]" in line or "[FATAL]" in line:
-                    failures.append(f"Hardware failure reported: {line.strip()}")
-                    print(f"\n  ❌ [HARDWARE FAILURE] {line.strip()}\n")
-
-                # 1. POWER_DIAG Check
-                if "[DIAG] Battery Rail" in line:
-                    power_diag_parts.append(line.split(":", 1)[-1].strip())
-                elif "[DIAG] Memory / Storage" in line:
-                    power_diag_parts.append(line.split(":", 1)[-1].strip())
-                    if not checks["POWER_DIAG"]["passed"]:
+                if "[DIAG]" in line:
+                    power_diag_parts.append(line.split("[DIAG]", 1)[1].strip())
+                    if "Memory / Storage" in line and not checks["POWER_DIAG"]["passed"]:
                         checks["POWER_DIAG"]["passed"] = True
-                        passed_count += 1
-                        checks["POWER_DIAG"]["detail"] = " | ".join(power_diag_parts)
-                        print(f"  ├─✔ [CHECK 1/6 PASS] POWER_DIAG: {checks['POWER_DIAG']['detail']}")
+                        checks["POWER_DIAG"]["detail"] = " ; ".join(power_diag_parts)
 
-                # 2. MIC_POWER Check
-                elif "[MIC]  Power Gate" in line or "[MIC] Power Gate" in line:
-                    if not checks["MIC_POWER"]["passed"]:
-                        checks["MIC_POWER"]["passed"] = True
-                        passed_count += 1
-                        checks["MIC_POWER"]["detail"] = line.split(":", 1)[-1].strip()
-                        print(f"  ├─✔ [CHECK 2/6 PASS] MIC_POWER: {checks['MIC_POWER']['detail']}")
+                elif "[MIC]  Power Gate" in line and "Active" in line:
+                    checks["MIC_POWER"]["passed"] = True
+                    checks["MIC_POWER"]["detail"] = line.split(":", 1)[1].strip()
 
-                # 3. MIC_DMA_STREAM Check
-                elif "[MIC]  Signal Health" in line or "[MIC] Signal Health" in line:
-                    if not checks["MIC_DMA_STREAM"]["passed"]:
-                        checks["MIC_DMA_STREAM"]["passed"] = True
-                        passed_count += 1
-                        checks["MIC_DMA_STREAM"]["detail"] = line.split(":", 1)[-1].strip()
-                        print(f"  ├─✔ [CHECK 3/6 PASS] MIC_DMA_STREAM: {checks['MIC_DMA_STREAM']['detail']}")
+                elif "[MIC]  Signal Health" in line and "OK" in line:
+                    checks["MIC_DMA_STREAM"]["passed"] = True
+                    checks["MIC_DMA_STREAM"]["detail"] = line.split(":", 1)[1].strip()
 
-                # 4. IMU_BUS Check
-                elif "[IMU]  I2C Bus" in line or "[IMU] I2C Bus" in line:
-                    if not checks["IMU_BUS"]["passed"]:
-                        checks["IMU_BUS"]["passed"] = True
-                        passed_count += 1
-                        checks["IMU_BUS"]["detail"] = line.split(":", 1)[-1].strip()
-                        print(f"  ├─✔ [CHECK 4/6 PASS] IMU_BUS: {checks['IMU_BUS']['detail']}")
+                elif "[IMU]  I2C Bus" in line and "Operational" in line:
+                    checks["IMU_BUS"]["passed"] = True
+                    checks["IMU_BUS"]["detail"] = line.split(":", 1)[1].strip()
 
-                # 5. IMU_ACCEL Check
-                elif "[IMU]  Accelerometer" in line or "[IMU] Accelerometer" in line:
-                    if not checks["IMU_ACCEL"]["passed"]:
-                        checks["IMU_ACCEL"]["passed"] = True
-                        passed_count += 1
-                        checks["IMU_ACCEL"]["detail"] = line.split(":", 1)[-1].strip()
-                        print(f"  ├─✔ [CHECK 5/6 PASS] IMU_ACCEL: {checks['IMU_ACCEL']['detail']}")
+                elif "[IMU]  Accelerometer" in line and "Active" in line:
+                    checks["IMU_ACCEL"]["passed"] = True
+                    checks["IMU_ACCEL"]["detail"] = line.split(":", 1)[1].strip()
 
-                # 6. CAL_AND_READY Check
+                elif "[BLE]  Advertiser" in line and "Active" in line:
+                    checks["BLE_ADVERTISER"]["passed"] = True
+                    checks["BLE_ADVERTISER"]["detail"] = line.split(":", 1)[1].strip()
+
                 elif "[READY] Initialization OK!" in line:
-                    if not checks["CAL_AND_READY"]["passed"]:
-                        checks["CAL_AND_READY"]["passed"] = True
-                        passed_count += 1
-                        checks["CAL_AND_READY"]["detail"] = "PLL Beat Clock armed & ready"
-                        print(f"  └─✔ [CHECK 6/6 PASS] CAL_AND_READY: {checks['CAL_AND_READY']['detail']}")
-                    ready_time = time.monotonic()
-                    if listen_sec > 0:
-                        print(f"\n[STEP 3/3] >>> Hardware Ready! Listening for {listen_sec:.1f}s for live events... <<<")
-                        print("           (Trigger clicks or shake/drop the board to verify live response)\n")
-
-                # Live events
-                if "[CLICK #" in line:
-                    clicks_seen += 1
-                    print(f"  │ ♫ [LIVE EVENT: CLICK #{clicks_seen}] {line.strip()}")
-                elif "[GESTURE:" in line or "[SHAKE DETECTED]" in line:
-                    gestures_seen += 1
-                    print(f"  │ ⚡ [LIVE EVENT: GESTURE #{gestures_seen}] {line.strip()}")
+                    checks["CAL_AND_READY"]["passed"] = True
+                    checks["CAL_AND_READY"]["detail"] = "Calibration complete & PLL ready"
+                    # If we attached mid-boot and only caught the tail end of the first self-test,
+                    # trigger a clean replay ('r') so all 7 checkpoints are captured.
+                    if not all(bool(c["passed"]) for c in checks.values()) and not replayed_after_partial:
+                        replayed_after_partial = True
+                        power_diag_parts.clear()
+                        trigger_self_test_replay(ser)
+                    else:
+                        ready_time = time.monotonic()
 
     except serial.SerialException as err:
-        print(f"\n[ERROR] Serial connection error on {com_port}: {err}")
+        print(f"[ERROR] Serial communication failure on {com_port}: {err}")
         return 1
 
-    total_duration = time.monotonic() - start_time
+    total_elapsed = time.monotonic() - start_time
+    all_passed = all(bool(c["passed"]) for c in checks.values()) and not failures
+
     print("\n" + "=" * 65)
-    print("  HIL VERIFICATION SUMMARY & SCORECARD")
+    print(f"  [STEP 2/2] HIL VERIFICATION SUMMARY ({total_elapsed:.2f}s total)")
     print("=" * 65)
-    all_passed = len(failures) == 0 and (passed_count == len(checks))
-
-    idx = 1
-    for key, data in checks.items():
-        is_p = bool(data["passed"])
-        mark = "PASS" if is_p else "FAIL"
-        symbol = "✔" if is_p else "✘"
-        detail_txt = f"({data['detail']})" if data["detail"] else ""
-        print(f"  {symbol} [{mark}] {idx}. {key:<14} : {data['name']} {detail_txt}")
-        idx += 1
-
-    print("-" * 65)
-    print(f"  Total Duration : {total_duration:.2f}s")
-    if listen_sec > 0:
-        print(f"  Live Captures  : {clicks_seen} clicks | {gestures_seen} mode gestures")
+    for key, info in checks.items():
+        status = "PASS" if info["passed"] else "FAIL"
+        detail = f" -- {info['detail']}" if info["detail"] else ""
+        print(f"  [{status}] {key:<16}: {info['name']}{detail}")
 
     if failures:
-        print("\n  ❌ FAILURES DETECTED:")
+        print("\n  [FAILURES]:")
         for f in failures:
             print(f"    - {f}")
-        print("\n  RESULT: TEST FAILED")
-    else:
-        print("\n  RESULT: ALL 6 CHECKS PASSED (Hardware & Firmware 100% Operational)")
 
-    print("=" * 65 + "\n")
+    print("=" * 65)
     return 0 if all_passed else 1
 
 
 def cmd_hil_test(args: argparse.Namespace) -> int:
-    """Execute HIL test (optionally deploying firmware first)."""
-    info = discover_device(args.drive, args.port)
-    if args.deploy:
-        if not info.drive_path:
-            print("[ERROR] Cannot deploy: CIRCUITPY drive not found.")
-            return 1
-        if not deploy_firmware(Path(args.file).resolve(), info.drive_path):
-            return 1
-        info = discover_device(args.drive, args.port)
+    """Run automated HIL test (optionally building & flashing Rust first with --deploy)."""
+    if getattr(args, "deploy", False):
+        args.no_build = False
+        args.test = True
+        return cmd_rust_deploy(args)
 
+    info = discover_device(args.drive, args.port)
     return run_hil_test(info.com_port, listen_sec=args.listen_sec, timeout_sec=args.timeout)
 
 
 def cmd_monitor(args: argparse.Namespace) -> int:
-    """Stream live USB serial console logs from the XIAO and handle interactive keyboard commands."""
-    info = discover_device(None, args.port)
+    """Stream live USB CDC serial output with interactive single-keystroke control."""
+    info = discover_device(args.drive, args.port)
     if not info.com_port:
         print("[ERROR] No XIAO serial port detected.")
         return 1
 
     print("=" * 65)
-    print(f"  [MONITOR] XIAO nRF52840 Console ({info.com_port} @ 115200 baud)")
+    print(f"  [MONITOR] XIAO nRF52840 Rust Console ({info.com_port} @ 115200 baud)")
     print("=" * 65)
     print("  Interactive Key Commands:")
     print("    [1]..[4] : Set Mode (1: On-Beat, 2: Upbeat, 3: 4/4, 4: 3/4)")
     print("    [m]      : Cycle to Next Mode")
-    print("    [s]      : Print Status & RAM Diagnostics")
+    print("    [d]/[s]  : Dump DSP, PLL, BLE, IMU & Battery State")
+    print("    [r]      : Replay Full Hardware Self-Test")
     print("    [z]      : Test Inactivity Sleep Mode")
-    print("    [r]      : Trigger Soft-Reboot (Reload code.py)")
+    print("    [b]      : Enter XIAO-SENSE UF2 Bootloader")
     print("    [h]      : Show Key Commands Help")
     print("    [Ctrl-C] : Exit Monitor")
     print("=" * 65 + "\n")
-
-    if args.send:
-        print(f"[MONITOR] Sending initial command key: {args.send!r}")
 
     is_windows = sys.platform == "win32"
     if is_windows:
@@ -768,9 +746,9 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         with serial.Serial(info.com_port, baudrate=115200, timeout=0.05) as ser:
             ser.dtr = True
             ser.rts = True
-            if args.reset:
-                trigger_soft_reboot(ser)
-            if args.send:
+            if getattr(args, "reset", False):
+                trigger_self_test_replay(ser)
+            if getattr(args, "send", None):
                 ser.write(args.send.encode("utf-8"))
                 ser.flush()
 
@@ -779,30 +757,24 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                 if args.duration > 0 and (time.monotonic() - start) >= args.duration:
                     break
 
-                # 1. Non-blocking keyboard input
                 if is_windows and msvcrt.kbhit():
                     ch_bytes = msvcrt.getch()
                     if ch_bytes in (b"\x00", b"\xe0"):
-                        msvcrt.getch()  # consume scan code for arrow/function keys
-                    elif ch_bytes == b"\x03":  # Ctrl-C
+                        msvcrt.getch()
+                    elif ch_bytes == b"\x03":
                         raise KeyboardInterrupt
                     else:
                         key_char = ch_bytes.decode("utf-8", errors="ignore")
-                        if key_char in ("r", "R"):
-                            print("\n[MONITOR] Dispatched Soft-Reboot (Ctrl-C + Ctrl-D)...", flush=True)
-                            trigger_soft_reboot(ser)
-                        elif key_char in ("h", "H", "?"):
+                        if key_char in ("h", "H", "?"):
                             print(
-                                "\n[HELP] 1..4=Mode | m=Cycle | s=Status | z=Sleep | r=Reboot | Ctrl-C=Exit\n",
+                                "\n[HELP] 1..4=Mode | m=Cycle | d/s=Dump | r=Self-Test | z=Sleep | b=Bootloader | Ctrl-C=Exit\n",
                                 flush=True,
                             )
                         elif key_char:
                             ser.write(ch_bytes)
                             ser.flush()
-                            if key_char in ("1", "2", "3", "4", "m", "M", "s", "S", "z", "Z"):
-                                print(f"\n[KEY: '{key_char}'] -> Sent to MCU", flush=True)
+                            print(f"\n[KEY: '{key_char}'] -> Sent to MCU", flush=True)
 
-                # 2. Non-blocking serial read
                 try:
                     waiting = ser.in_waiting
                     if waiting > 0:
@@ -823,83 +795,64 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
 
 def cmd_reset(args: argparse.Namespace) -> int:
-    """Soft-reboot the XIAO over USB Serial and print startup banner."""
+    """Replay the full hardware self-test on the Rust firmware and stream output."""
     args.reset = True
     args.send = None
-    args.duration = args.duration if hasattr(args, "duration") and args.duration else 4.0
+    args.duration = getattr(args, "duration", 4.0) or 4.0
     return cmd_monitor(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--drive", help="Explicit CIRCUITPY or XIAO-SENSE drive path (e.g. D:\\)")
+    common.add_argument("--drive", help="Explicit XIAO-SENSE bootloader drive path (e.g. D:\\)")
     common.add_argument("--port", help="Explicit COM port (e.g. COM9)")
 
     parser = argparse.ArgumentParser(
         prog="xiao-cli",
         parents=[common],
-        description="HIL Development & Rust/CircuitPython Test CLI for Seeed Studio XIAO nRF52840 Sense",
+        description="Rust Firmware Build, Flash, Monitor & HIL CLI for Seeed Studio XIAO nRF52840 Sense",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
     # status
-    sub_status = sub.add_parser("status", parents=[common], help="Detect CIRCUITPY/XIAO-SENSE drive and USB serial port")
+    sub_status = sub.add_parser("status", parents=[common], help="Detect XIAO-SENSE drive and Rust USB serial port")
     sub_status.set_defaults(func=cmd_status)
 
-    # python-deploy (CircuitPython)
-    sub_pydeploy = sub.add_parser("python-deploy", parents=[common], aliases=["deploy", "push"], help="Copy code.py to CIRCUITPY drive")
-    sub_pydeploy.add_argument("--file", default=str(DEFAULT_FIRMWARE_PATH), help="Source Python file to deploy")
-    sub_pydeploy.add_argument("--test", action="store_true", help="Run HIL verification immediately after deploy")
-    sub_pydeploy.add_argument("--listen-sec", type=float, default=0.0, help="Seconds to listen for clicks/gestures after init")
-    sub_pydeploy.add_argument("--timeout", type=float, default=10.0, help="Max seconds to wait for [READY]")
-    sub_pydeploy.set_defaults(func=cmd_python_deploy)
-
-    # python-restore (Restore CircuitPython runtime and CIRCUITPY drive from Rust/DFU)
-    sub_pyrestore = sub.add_parser(
-        "python-restore", parents=[common],
-        aliases=["restore", "restore-circuitpython"],
-        help="Flash official CircuitPython firmware UF2 to restore CIRCUITPY drive and deploy code.py",
-    )
-    sub_pyrestore.add_argument("--uf2", help="Custom CircuitPython UF2 runtime path (defaults to cached 9.2.4)")
-    sub_pyrestore.add_argument("--file", default=str(DEFAULT_FIRMWARE_PATH), help="Source Python file to deploy after restore")
-    sub_pyrestore.add_argument("--test", action="store_true", help="Run HIL verification immediately after restore")
-    sub_pyrestore.add_argument("--listen-sec", type=float, default=0.0, help="Seconds to listen for clicks/gestures after init")
-    sub_pyrestore.add_argument("--timeout", type=float, default=10.0, help="Max seconds to wait for [READY]")
-    sub_pyrestore.set_defaults(func=cmd_python_restore)
-
-    # rust-build
-    sub_rbuild = sub.add_parser("rust-build", parents=[common], help="Compile Rust firmware and generate UF2 image")
+    # build / rust-build
+    sub_rbuild = sub.add_parser("build", parents=[common], aliases=["rust-build"], help="Compile Rust firmware and generate UF2 image")
     sub_rbuild.add_argument("--manifest", default=str(RUST_MANIFEST_PATH), help="Path to Rust Cargo.toml")
-    sub_rbuild.add_argument("--output", default=str(DEFAULT_UF2_OUTPUT_PATH), help="Output UF2 file path")
+    sub_rbuild.add_argument("--output", default=None, help="Output UF2 file path")
+    sub_rbuild.add_argument("--smoke-test", action="store_true", help="Build minimal 65-line deploy-test binary instead of full app")
     sub_rbuild.set_defaults(func=cmd_rust_build)
 
-    # rust-deploy
-    sub_rdeploy = sub.add_parser("rust-deploy", parents=[common], help="Build and flash Rust UF2 firmware to XIAO-SENSE")
-    sub_rdeploy.add_argument("--uf2", default=str(DEFAULT_UF2_OUTPUT_PATH), help="UF2 file to flash")
+    # deploy / rust-deploy / push
+    sub_rdeploy = sub.add_parser("deploy", parents=[common], aliases=["rust-deploy", "push"], help="Build and flash Rust UF2/DFU firmware to XIAO-SENSE")
+    sub_rdeploy.add_argument("--uf2", default=None, help="UF2 file to flash")
+    sub_rdeploy.add_argument("--dfu", action="store_true", help="Flash via official adafruit-nrfutil serial DFU (.zip) instead of UF2")
+    sub_rdeploy.add_argument("--smoke-test", action="store_true", help="Build, flash, and verify minimal deploy-test binary")
     sub_rdeploy.add_argument("--no-build", action="store_true", help="Skip cargo build if UF2 already exists")
     sub_rdeploy.add_argument("--test", action="store_true", help="Run HIL verification immediately after flashing")
     sub_rdeploy.add_argument("--listen-sec", type=float, default=0.0, help="Seconds to listen for clicks/gestures after init")
     sub_rdeploy.add_argument("--timeout", type=float, default=10.0, help="Max seconds to wait for [READY]")
     sub_rdeploy.set_defaults(func=cmd_rust_deploy)
 
-    # hil-test
-    sub_test = sub.add_parser("hil-test", parents=[common], aliases=["test"], help="Run automated on-device HIL verification")
-    sub_test.add_argument("--deploy", action="store_true", help="Deploy latest code.py before testing")
-    sub_test.add_argument("--file", default=str(DEFAULT_FIRMWARE_PATH), help="Source Python file if --deploy is used")
+    # test / hil-test
+    sub_test = sub.add_parser("test", parents=[common], aliases=["hil-test"], help="Run automated 7-point on-device HIL verification")
+    sub_test.add_argument("--deploy", action="store_true", help="Build and flash latest Rust UF2 before testing")
     sub_test.add_argument("--listen-sec", type=float, default=0.0, help="Seconds to listen for live clicks/shakes after init")
     sub_test.add_argument("--timeout", type=float, default=10.0, help="Max seconds to wait for [READY]")
     sub_test.set_defaults(func=cmd_hil_test)
 
-    # monitor
-    sub_mon = sub.add_parser("monitor", parents=[common], aliases=["logs"], help="Stream live serial console output")
-    sub_mon.add_argument("--reset", action="store_true", help="Soft-reset board upon connecting")
-    sub_mon.add_argument("--send", help="Send a single debug key upon connecting (e.g. 'd', 'r', '1'..'4', 'z', 'b')")
+    # monitor / logs
+    sub_mon = sub.add_parser("monitor", parents=[common], aliases=["logs"], help="Stream live Rust serial console output")
+    sub_mon.add_argument("--reset", action="store_true", help="Trigger hardware self-test upon connecting")
+    sub_mon.add_argument("--send", help="Send a single debug key upon connecting (e.g. 'd', 'r', '1'..'4', 'm', 'z', 'b')")
     sub_mon.add_argument("--duration", type=float, default=0.0, help="Auto-exit after N seconds (0 = continuous)")
     sub_mon.set_defaults(func=cmd_monitor)
 
     # reset
-    sub_rst = sub.add_parser("reset", parents=[common], help="Soft-reboot board over serial and show startup log")
+    sub_rst = sub.add_parser("reset", parents=[common], help="Trigger hardware self-test over serial and show startup log")
     sub_rst.add_argument("--duration", type=float, default=4.0, help="Seconds to stream startup output")
     sub_rst.set_defaults(func=cmd_reset)
 

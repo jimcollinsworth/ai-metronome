@@ -1,75 +1,55 @@
-# Testing Documentation & Verification Guide: ai-metronome
+# Testing Documentation & Verification Guide: `ai-metronome`
 
-This document defines the testing strategy, test suites, execution commands, and operational standards for `ai-metronome`.
-
----
-
-## 1. Testing Architecture & Verification Pyramid
-
-Testing for this project operates across defined tiers:
-
-- **Host Unit Testing (DSP, Mode Engine & Gesture Math)**: Isolated verification of the PDM high-pass feature extractor, adaptive click detector, 4-mode visual flash sequencer, and 3-axis accelerometer gesture detector (2 slow shakes or 1 harder drop to table).
-- **Hardware-in-the-Loop (HIL CLI Test Runner — `xiao-cli`)**: Automated on-device deployment and verification over USB (`CIRCUITPY` drive + USB CDC serial port). Soft-reboots the XIAO nRF52840 Sense and validates all 6 hardware initialization milestones (`POWER_DIAG`, `MIC_POWER`, `MIC_DMA_STREAM`, `IMU_BUS`, `IMU_ACCEL`, `CAL_AND_READY`).
-- **Smoke Testing**: Package importability sanity checks.
+This document defines the testing strategy, test suites, and Windows `cmd.exe` verification commands for `ai-metronome`.
 
 ---
 
-## 2. Active Test Suites
+## 1. Verification Tiers
 
-| Test File / Tool | Scope |
-|-----------|-------|
-| `tests/test_smoke.py` | Package importability sanity check |
-| `tests/test_click_detector.py` | First-difference high-pass filter DC cancellation, transient click detection, refractory echo rejection, low-frequency hum immunity, and 120 BPM tempo calculation |
-| `tests/test_mode_engine.py` | 4-mode visual flash sequencing (On-Beat, Upbeat, 4/4 Meter, 3/4 Meter), pause reset timeout, and 3-axis accelerometer gesture detection (`DOUBLE_SHAKE` & `HARD_DROP`) |
-| `tests/test_uf2_packer.py` | Pure-Python ELF32 `PT_LOAD` parser & UF2 block generator (`0xADA52840`) |
-| `src/xiao_nrf52840_sense/rust/` | Rust host unit tests (`click_detector`, `mode_engine`, `gesture`, `crash_log`) |
-| `tools/xiao_cli.py` | Hardware-in-the-Loop (HIL) deployment, serial reset, live log streaming, and automated 6-point hardware verification |
-
-*(Archived Puck.js BLE tests are preserved under `archive/puck/tests/`.)*
+1. **Rust Host Unit Tests (`cargo test`)**:
+   - Exercises the platform-independent `no_std` core library natively on `x86_64-pc-windows-msvc`:
+     - `ble_advertiser`: BLE `ADV_NONCONN_IND` header (`0x42`), Random Static MAC formatting (`|= 0xC0`), and **BTHome v2** (`UUID = 0xFCD2`) payload encoding for fractional (`0.01` factor) and integer BPM.
+     - `mode_engine`: 4-mode beat sequencing, pre-lock dimming (`0.18`), weak-beat Red dimming (`0.20`), continuous flywheel coasting after sound stops, seamless mode switching, and immediate deceleration/acceleration adaptation.
+     - `click_detector`: First-difference high-pass filter ($H(z)=1-z^{-1}$), outlier-resistant lower-tertile startup calibration, and sub-frame ($62.5\,\mu\text{s}$) impulse detection.
+     - `gesture`: Dual-gesture mode switching (`DOUBLE_SHAKE` and `HARD_DROP`) and 30s inactivity sleep/wake state machine.
+     - `crash_log`: Retained SRAM (`0x2003FF00`) panic & `HardFault` recording and CRC/magic validation.
+2. **UF2 Toolchain & Reference Tests (`pytest`)**:
+   - Validates the pure-Python ELF32 `PT_LOAD` parser and UF2 block generator (`tests/test_uf2_packer.py`) as well as reference DSP/PLL algorithms (`tests/test_click_detector.py`, `tests/test_mode_engine.py`).
+3. **On-Device Hardware-in-the-Loop Verification (`uv run xiao-cli test`)**:
+   - Connects to the XIAO nRF52840 Sense over USB CDC serial (`115200` baud), triggers the hardware self-test (`'r'`), and verifies all 7 hardware checkpoints:
+     1. `POWER_DIAG` — Battery voltage divider (`P0.14` / `AIN7`), charge status (`P0.17`), CPU die temp (`NRF_TEMP`), and memory map.
+     2. `MIC_POWER` — `P1.10` (`MIC_PWR`) high-drive (`H0H1`) power rail activation.
+     3. `MIC_DMA_STREAM` — `NRF_PDM` 16 kHz 16-bit mono EasyDMA frame capture and peak-to-peak signal health.
+     4. `IMU_BUS` — `P1.08` (`IMU_PWR`) high-drive rail and `NRF_TWIM0` 400 kHz I2C bus (`addr=0x6A`).
+     5. `IMU_ACCEL` — `LSM6DS3TR-C` `WHO_AM_I=0x6A` verification, 3-axis accelerometer (`g`), and 3-axis gyroscope (`dps`).
+     6. `BLE_ADVERTISER` — `NRF_RADIO` 2.4 GHz BLE 1 Mbps advertiser (`Name="AI-METRO"`, `BTHome v2 UUID=0xFCD2`).
+     7. `CAL_AND_READY` — 25-frame ambient noise floor calibration, 3x Green LED blink, and `[READY]` state.
 
 ---
 
-## 3. Environment & Test Execution Commands (Windows `cmd.exe`)
+## 2. Test Execution Commands (`cmd.exe`)
 
-### Toolchain Versions & Requirements
-* **Environment & Package Manager**: `uv` (`.venv/`)
-* **Python Runtime**: Python 3.12+
-* **Rust Toolchain**: `rustc 1.97.1+` (`x86_64-pc-windows-msvc` and `thumbv7em-none-eabihf`)
-* **Test Framework**: `pytest` (v9.0+)
-
-### Running Python Host Unit Tests (`cmd.exe`)
-```cmd
-uv run pytest -v
-```
-
-### Running Rust Host Unit Tests (`cmd.exe`)
+### A. Rust Core Unit Tests
 ```cmd
 cargo test --manifest-path src\xiao_nrf52840_sense\rust\Cargo.toml --lib --target x86_64-pc-windows-msvc
 ```
 
-### Building & Deploying Rust UF2 Firmware (`cmd.exe`)
+### B. Python UF2 Packer & Reference Unit Tests
 ```cmd
-:: Build release binary and pack build\ai-metronome-rust.uf2
-uv run xiao-cli rust-build
-
-:: Flash UF2 image to XIAO-SENSE and wait for serial port
-uv run xiao-cli rust-deploy
-
-:: Flash UF2 image and immediately run 6-point HIL verification
-uv run xiao-cli rust-deploy --test
+uv run pytest -v
 ```
 
-### Running Hardware-in-the-Loop (HIL) Commands (`xiao-cli`)
+### C. Rust Build, Flash & On-Device HIL Verification
 ```cmd
-:: Detect connected XIAO drive and COM port
-uv run xiao-cli status
+:: Build release ELF and pack build\ai-metronome-rust.uf2 (linked @ 0x00027000)
+uv run xiao-cli build
 
-:: Deploy CircuitPython code.py and run automated 6-point HIL hardware test
-uv run xiao-cli python-deploy --test
+:: Flash UF2 to XIAO-SENSE and immediately run the 7-point HIL test
+uv run xiao-cli deploy --test
 
-:: Run HIL test against currently running firmware (CircuitPython or Rust)
-uv run xiao-cli hil-test --port COM9
+:: Re-run the 7-point HIL test on already-flashed hardware
+uv run xiao-cli test
 
-:: Live serial console & interactive debug keys ('d', 'r', 'b', 'z', '1'..'4')
-uv run xiao-cli monitor --port COM9
+:: Listen for live clicks, gestures, and BLE broadcasts for 15 seconds
+uv run xiao-cli test --listen-sec 15
 ```

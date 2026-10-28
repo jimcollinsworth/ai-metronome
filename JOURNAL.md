@@ -4,6 +4,74 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-28 — Proven Rust UF2/DFU Deployment, Clean-Boot `SCB::sys_reset()` Trampoline & 7-Point HIL Pass (`COM10`)
+
+> [!NOTE] User Instructions & Guidance:
+> - *"deploying to the device shouldn't be so hard, maybe our application code is getting in the way. maybe write a test app just to work on deploy. /plan"*
+> - *"simplify the sample program to run on this device, just a print to debug. try this first"*
+> - *"also find the official nrf52840 burning and other tools, use these or learn from them."*
+> - *"finally! lets save this knowledge for the future for sure, and remove the previous false assumptions we might have made."*
+
+### ADR 018: Root-Cause Resolution of Post-UF2 `NRF_USBD` Enumeration (`SCB::sys_reset()` Clean-Boot Trampoline, `.max_packet_size_0(64)`, & Official S140 DFU Packaging)
+- **Context**:
+  - Previously, flashing a Rust `.uf2` file to `D:\` (`XIAO-SENSE`) caused Windows to report `Unknown USB Device (Device Descriptor Request Failed)` (`USB\VID_0000&PID_0002`) immediately after the UF2 copy finished, even though pressing Reset or re-plugging allowed the Rust firmware to enumerate as `COM15 [2886:0045]`.
+  - Earlier debugging had made several **false assumptions** (which are now removed from code and documentation):
+    1. *False Assumption 1*: Manually toggling `USBD.USBPULLUP` or `USBD.ENABLE` before `Usbd::new()` would reset the USB bus after UF2 copy. (In reality, touching `USBD` registers before `nrf-usbd` initializes corrupts `nrf-usbd`'s internal power/event state machine.)
+    2. *False Assumption 2*: Calling `cortex_m::interrupt::enable()` was needed for USB enumeration. (In reality, `nrf-usbd` is purely register-polled via `usb_dev.poll()`; enabling global interrupts without a `USBD` ISR vectors into `DefaultHandler`.)
+    3. *False Assumption 3*: `usb-device`'s `UsbDeviceBuilder::new()` defaulted EP0 max packet size to 64 bytes. (In reality, `usb-device 0.3.2` defaults `max_packet_size_0` to `8` bytes, which fails `nrf-usbd` EP0 descriptor transfers unless `.max_packet_size_0(64).unwrap()` is explicitly called.)
+- **Verified Root Cause & Solution**:
+  1. **Why Post-UF2 Jump Failed While Pin-Reset Succeeded**:
+     - While `XIAO-SENSE` (`D:\`) is mounted, the Adafruit UF2 bootloader (`0.6.2`) actively runs TinyUSB (MSC + CDC) on `NRF_USBD`. When the final UF2 block is written, the bootloader calls `board_teardown()` and jumps directly to `0x00027000` **without performing a hardware MCU reset**, leaving `NRF_USBD` internal PHY/endpoint state dirty.
+     - By contrast, on a hardware or system reset (`SCB::sys_reset()`), the bootloader sees a valid app at `0x00027000`, **skips TinyUSB completely**, and jumps straight to `0x00027000` on 100% freshly reset silicon.
+  2. **One-Shot `SCB::sys_reset()` Clean-Boot Trampoline (`0x2003_FEFC`)**:
+     - Reserved `0x2003_FEFC` (`CLEAN_BOOT_FLAG_PTR`) in `memory.x` (`RAM LENGTH = 237296`).
+     - At the start of `main()` (in both `src/bin/deploy_test.rs` and `src/main.rs`), if `*0x2003_FEFC != 0xB007_C1EA`, the firmware writes `0xB007_C1EA`, delays ~200 ms (`cortex_m::asm::delay(12_800_000)`) so Windows finishes unmounting `D:\`, and calls `SCB::sys_reset()`.
+     - On the instant reboot (<1 ms), the bootloader skips TinyUSB and jumps straight back to `main()` on virgin hardware, where `nrf-usbd` enumerates `COM10` / `COM16` (`2886:0045`) within 1 second every single time.
+  3. **Minimal Smoke-Test Binary (`src/bin/deploy_test.rs`)**:
+     - Created a standalone minimal debug binary (`uv run xiao-cli deploy --smoke-test`) that lights the Green LED (`P0.30`), enumerates USB CDC, and prints `[DEPLOY_TEST] Hello from XIAO Rust!`. Verified `PASS` on `COM16`.
+  4. **Official `adafruit-nrfutil` S140 v7.3.0 DFU Packaging & Unbuffered 512-Byte UF2 Flashing (`tools/xiao_cli.py`)**:
+     - Added `elf_to_ihex()` and `build_dfu_package()` (`adafruit-nrfutil dfu genpkg --dev-type 0x0052 --sd-req 0x0123`) so `xiao-cli build` outputs both `.uf2` and official `.zip` DFU packages (`--dfu`).
+     - Replaced `shutil.copyfile` with `copy_uf2_blocks_flushed()` (unbuffered 512-byte UF2 block writes + `os.fsync()`).
+     - Added `delay_ms_with_poll()` in `hardware.rs` so USB CDC stays continuously polled during `MIC_PWR` (`30 ms`) and `IMU_PWR` (`80 ms`) startup delays.
+  5. **On-Device Verification (`COM10`)**:
+     - Ran `uv run xiao-cli deploy --no-build --test`: automatically triggered bootloader from `COM10`, flashed `ai-metronome-rust.uf2` (`120,320 bytes`) to `D:\`, re-enumerated `COM10` in ~1s, and **passed all 7/7 HIL checkpoints** (`POWER_DIAG`, `MIC_POWER`, `MIC_DMA_STREAM`, `IMU_BUS`, `IMU_ACCEL`, `BLE_ADVERTISER` `MAC=EB:E5:CF:40:4D:4A`, `CAL_AND_READY`) in `0.83s`.
+
+---
+
+## 2026-10-27 — Rust-Only Toolchain Separation, BLE Tempo Advertiser (`BTHome v2`), & S140 Boot/NVIC Hardening
+
+> [!NOTE] User Instructions & Guidance:
+> - *"lets add some bluetooth now to the rust version, we can hold on any circuit python updates for now. using ble we want to transmit the current tempo. how can we do that, what options?"*
+> - *"option 1, make it so, and add tests for ble/rust"*
+> - *"ok, do the rust ble support so i can see and track tempo in sensor logger, and new ble tests, don't worry about circuit python compatibility any more on features/tests, just cli support"*
+> - *"/plan trying to support easy switching between the circuit python and rust seems to complicate our toolchain and the process itself, i don't really need easy switching. lets separate the 2 environment inits/restore from the 2 different code deploys, and the testing. cirucuit python was our prototype, the rest is all rust i think"*
+> - *"yes proceed, and do a review of code structure, init processing, error and debugging, readme and other core documents for readability, conciseness"*
+
+### ADR 017: Bare-Metal `NRF_RADIO` BLE Advertiser (`BTHome v2` `0xFCD2`), Rust-Only Toolchain & Boot/NVIC Hardening
+- **Context**:
+  1. We needed to broadcast live metronome tempo (BPM) over Bluetooth Low Energy from the Embedded Rust firmware so Android **Sensor Logger** can discover, plot, and record tempo without GATT pairing overhead.
+  2. Supporting dynamic CircuitPython/Rust switching inside `xiao_cli.py` introduced brittle baud-touching heuristics and UF2 block merging.
+  3. When booting bare-metal Rust at `0x00027000` (behind the factory Adafruit UF2 bootloader and Nordic SoftDevice S140 v7.3.0), two low-level hardware hazards prevented reliable USB CDC enumeration:
+     - **RAM & Stack Overlap**: `memory.x` originally placed `RAM` at `0x20000008` with default stack at `0x20040000`, overlapping both the MBR/S140 reserved RAM (`0x20000000..0x20006000`) and the retained crash log at `0x2003FF00`.
+     - **Pending Bootloader NVIC Interrupts**: The Adafruit UF2 bootloader runs TinyUSB with `USBD`, `POWER`, and `TIMER` interrupts enabled in the Cortex-M4F `NVIC`. As soon as `main()` changed `SCB->VTOR = 0x00027000`, any pending USB/timer IRQ vectored into `cortex-m-rt`'s `DefaultHandler` (`loop {}`), freezing the MCU before USB CDC could enumerate.
+- **Decision & Implementation**:
+  1. **Pure-Rust BLE Tempo Advertiser (`ble_advertiser.rs` & `BleRadioDriver` in `hardware.rs`)**:
+     - Implemented `build_tempo_adv_pdu()` constructing a 32-byte legacy BLE `ADV_NONCONN_IND` PDU (`S0 = 0x42`, 6-byte Random Static MAC from `FICR.DEVICEADDR` with `|= 0xC0`, Flags `0x06`, Complete Local Name `"AI-METRO"`, and **BTHome v2** Service Data `UUID = 0xFCD2`).
+     - Encodes both fractional BPM (`0.01 BPM` resolution via BTHome Object `0x02` `int16`) and rounded integer BPM (Object `0x3D` `uint16`) so Android Sensor Logger plots exact tempo immediately.
+     - Configured `NRF_RADIO` in `Ble_1Mbit` mode (`+4 dBm`, fast ramp-up, hardware whitening, 24-bit CRC `0x00065B`) to transmit across primary advertising channels 37 (`2402 MHz`), 38 (`2426 MHz`), and 39 (`2480 MHz`) on every beat and every `200 ms` (5 Hz).
+  2. **Rust `MetronomeModeEngine` Parity (`mode_engine.rs`)**:
+     - Ported continuous flywheel coasting (infinite coasting after sound stops until next sound resyncs), seamless mode switching without resetting tempo/lock, and two-click tempo deceleration/acceleration tracking (`prev_dt_sec`).
+  3. **S140 Memory Map, NVIC Masking & Fault Diagnostics (`memory.x`, `main.rs`)**:
+     - Updated `memory.x` to `FLASH = 0x00027000` (`792K`), `RAM = 0x20006000` (`237296` bytes), and `_stack_start = 0x2003FEF0` (strictly below `CLEAN_BOOT_FLAG_PTR` at `0x2003FEFC` and `CRASH_LOG_PTR` at `0x2003FF00`).
+     - At the start of `main()`, masked all interrupts, stopped bootloader FreeRTOS `SysTick`, cleared all 8 `NVIC.ICER` and `NVIC.ICPR` registers, set `SCB->VTOR = 0x00027000` with `dsb`/`isb` barriers, and executed the one-shot `SCB::sys_reset()` clean-boot trampoline (`0x2003FEFC`) so `NRF_USBD` enumerates on freshly reset silicon.
+     - Added a custom `#[exception] fn HardFault(ef: &ExceptionFrame)` handler that logs `pc`, `lr`, and `xpsr` into retained SRAM (`0x2003FF00`) and a non-blocking `#[exception] fn DefaultHandler` that clears stray IRQs instead of hanging.
+  4. **Toolchain Separation (`tools/xiao_cli.py` & `tools/restore_circuitpython.py`)**:
+     - Isolated CircuitPython restoration into `tools/restore_circuitpython.py`.
+     - Streamlined `tools/xiao_cli.py` into a concise, deterministic Rust-only tool (`status`, `build`, `deploy`, `test`, `monitor`, `reset`) with a 7-point HIL check including `BLE_ADVERTISER`.
+     - Revised `README.md`, `TESTING.md`, `PLANNING.md`, and `ROADMAP.md` for clarity and conciseness.
+
+---
+
 ## 2026-10-27 — Dynamic Tempo Adaptation (Deceleration & Acceleration Tracking)
 
 > [!NOTE] User Instructions & Guidance:

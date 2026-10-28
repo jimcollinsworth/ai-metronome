@@ -41,19 +41,48 @@ Unlike generic dev boards, the XIAO nRF52840 Sense gates its onboard sensors beh
 
 ---
 
-## 3. Project HIL Development & Testing Workflow (`xiao-cli`)
+## 3. Embedded Rust Boot, USB CDC Enumeration & UF2/DFU Flashing Rules (Proven on Hardware)
 
-Always verify changes on the physical XIAO nRF52840 Sense using `xiao-cli` (`tools/xiao_cli.py`):
+When building bare-metal Embedded Rust (`thumbv7em-none-eabihf`, `nrf52840-hal` / `nrf-usbd` / `usb-device`) for the Seeed Studio XIAO nRF52840 Sense (which ships with `UF2 Bootloader 0.6.2` and `SoftDevice: S140 7.3.0`), **five strict hardware/bootloader requirements** must be followed, and previous false assumptions must be avoided:
 
-```bash
-# 1. Discover mounted CIRCUITPY drive (e.g. D:\) and USB Serial port (e.g. COM9)
+### A. Verified Rules (Must Always Do)
+1. **Link at `0x00027000` (Above S140 v7.3.0) with `RAM = 0x20006000`**:
+   - The factory bootloader expects the application vector table at `0x00027000` (`nrf52840_s140_v7.ld`).
+   - Reserve `0x20000000..0x20006000` for MBR/S140 and keep the top 272 bytes (`0x2003FEF0..0x20040000`) above `_stack_start` for the clean-boot trampoline flag (`0x2003FEFC`) and retained crash log (`0x2003FF00`).
+2. **One-Shot `SCB::sys_reset()` Clean-Boot Trampoline After UF2 Flashing (`0x2003FEFC`)**:
+   - **Why**: When `XIAO-SENSE` (`D:\`) is mounted, the Adafruit UF2 bootloader runs TinyUSB (MSC + CDC) on `NRF_USBD`. When a `.uf2` file finishes copying, the bootloader calls `board_teardown()` and jumps directly to `0x00027000` **without performing a hardware MCU reset**, leaving `NRF_USBD` internal state dirty (`USB\VID_0000&PID_0002` — *Device Descriptor Request Failed*).
+   - **Fix**: On entry to `main()`, check a retained SRAM word (`0x2003_FEFC != 0xB007_C1EA`). On the first entry after UF2 jump, write `0xB007_C1EA`, delay ~200 ms (`cortex_m::asm::delay(12_800_000)`) so Windows finishes unmounting `D:\`, and call `SCB::sys_reset()`. On the instant reboot (<1 ms), the bootloader sees a valid app, **skips TinyUSB completely**, and jumps back to `0x00027000` on 100% freshly reset silicon!
+3. **Explicit `.max_packet_size_0(64).unwrap()` on `UsbDeviceBuilder`**:
+   - `usb-device 0.3.2` defaults `max_packet_size_0` to `8` bytes (`device_builder.rs:92`), whereas `nrf-usbd` requires 64-byte EP0 control transfers. Omitting `.max_packet_size_0(64)` causes Windows descriptor requests to fail.
+4. **Stop Bootloader FreeRTOS `SysTick` & Mask NVIC Before Setting `SCB->VTOR = 0x00027000`**:
+   - Disable interrupts (`cortex_m::interrupt::disable()`), stop `SysTick` (`SYST.CSR = 0`), clear pending `SysTick`/`PendSV` in `SCB->ICSR`, clear all 8 `NVIC.ICER`/`NVIC.ICPR` registers, and only then write `SCB->VTOR = 0x00027000`.
+5. **Unbuffered 512-Byte UF2 Block Writes & Continuous USB Polling**:
+   - Write `.uf2` files in unbuffered 512-byte blocks (`buffering=0` + `os.fsync()`) or flash via official `adafruit-nrfutil dfu serial` (`--dev-type 0x0052 --sd-req 0x0123`).
+   - Poll `usb_dev.poll(&mut [&mut serial])` during sensor power-up delays (`delay_ms_with_poll`) and PDM DMA waits (`capture_frame_with_poll`).
+
+### B. False Assumptions Removed (Do NOT Do)
+- **FALSE**: *"Touching `USBD.USBPULLUP` or `USBD.ENABLE` manually before `Usbd::new()` fixes post-UF2 enumeration."* — Touching `USBD` registers before `nrf-usbd` initializes actually interferes with `nrf-usbd`'s internal power/event state machine; a clean `SCB::sys_reset()` trampoline is what resets `NRF_USBD` hardware properly.
+- **FALSE**: *"Enabling global interrupts (`cortex_m::interrupt::enable()`) helps `nrf-usbd` enumerate."* — Polling `usb_dev.poll()` works purely via registers with `PRIMASK=1`; enabling global interrupts without a `USBD` ISR vectors into `DefaultHandler`.
+- **FALSE**: *"Linking bare-metal Rust at `0x00001000` works on factory XIAO nRF52840 Sense."* — Overwriting `0x1000` erases SoftDevice S140 v7.3.0 and causes the factory bootloader (`0.6.2`) to reject the image and loop in DFU mode.
+
+---
+
+## 4. Project Rust Development & HIL Testing Workflow (`xiao-cli`)
+
+Always verify changes on the physical XIAO nRF52840 Sense using `xiao-cli` (`tools/xiao_cli.py`) in Windows `cmd.exe`:
+
+```cmd
+:: 1. Discover mounted XIAO-SENSE drive or Rust USB Serial port (e.g. COM10 [2886:0045])
 uv run xiao-cli status
 
-# 2. Deploy code.py and run automated 6-point Hardware-in-the-Loop (HIL) test
-uv run xiao-cli hil-test --deploy
+:: 2. Build & flash minimal USB serial smoke-test binary (build\deploy-test.uf2)
+uv run xiao-cli deploy --smoke-test
 
-# 3. Stream live serial output or listen for live clicks/gestures
-uv run xiao-cli hil-test --listen-sec 10
+:: 3. Build, flash, and run automated 7-point Hardware-in-the-Loop (HIL) test
+uv run xiao-cli deploy --test
+
+:: 4. Re-run 7-point HIL test or open interactive live serial monitor
+uv run xiao-cli test
 uv run xiao-cli monitor
 ```
 

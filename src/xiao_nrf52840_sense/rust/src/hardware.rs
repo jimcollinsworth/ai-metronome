@@ -9,9 +9,12 @@
 #![allow(clippy::needless_range_loop)]
 
 use nrf52840_hal::pac::{
-    p0, P0, P1, PDM, POWER, SAADC, SCB, TEMP, TIMER0, TWIM0, WDT,
+    p0, FICR, P0, P1, PDM, POWER, RADIO, SAADC, SCB, TEMP, TIMER0, TWIM0, WDT,
 };
 
+use ai_metronome_rust::ble_advertiser::{
+    build_tempo_adv_pdu, format_random_static_mac, BLE_ADV_CHANNELS, MAX_BLE_PDU_LEN,
+};
 use ai_metronome_rust::mode_engine::{LedColor, PRE_LOCK_BRIGHTNESS, WEAK_BEAT_RED_BRIGHTNESS};
 
 /// Adafruit UF2 Bootloader magic value in `NRF_POWER->GPREGRET` to enter UF2 DFU mode.
@@ -78,14 +81,23 @@ impl MonotonicTimer {
     }
 
     pub fn delay_us(&mut self, timer0: &TIMER0, us: u64) {
+        self.delay_us_with_poll(timer0, us, || {});
+    }
+
+    pub fn delay_us_with_poll<F: FnMut()>(&mut self, timer0: &TIMER0, us: u64, mut poll_fn: F) {
         let start = self.now_us(timer0);
         while self.now_us(timer0).wrapping_sub(start) < us {
+            poll_fn();
             cortex_m::asm::nop();
         }
     }
 
     pub fn delay_ms(&mut self, timer0: &TIMER0, ms: u32) {
         self.delay_us(timer0, (ms as u64) * 1000);
+    }
+
+    pub fn delay_ms_with_poll<F: FnMut()>(&mut self, timer0: &TIMER0, ms: u32, poll_fn: F) {
+        self.delay_us_with_poll(timer0, (ms as u64) * 1000, poll_fn);
     }
 }
 
@@ -209,6 +221,7 @@ impl RgbLedController {
     }
 
     /// 3 Green blinks on successful startup calibration (`signal_init_ok`).
+    #[allow(dead_code)]
     pub fn signal_init_ok(&mut self, p0: &p0::RegisterBlock, timer: &mut MonotonicTimer, timer0: &TIMER0) {
         self.off(p0);
         for _ in 0..3 {
@@ -223,6 +236,7 @@ impl RgbLedController {
     /// 1) 350 ms Bright White burst (all 3 RGB diodes ON)
     /// 2) 220 ms dark pause
     /// 3) `mode_num` (1..4) distinct pulses in the new mode's color
+    #[allow(dead_code)]
     pub fn signal_mode_change(
         &mut self,
         p0: &p0::RegisterBlock,
@@ -390,20 +404,23 @@ pub fn read_power_diagnostics(
 
     saadc.events_started.write(|w| unsafe { w.bits(0) });
     saadc.tasks_start.write(|w| unsafe { w.bits(1) });
-    while saadc.events_started.read().bits() == 0 {
-        cortex_m::asm::nop();
+    let mut adc_guard = 50_000u32;
+    while saadc.events_started.read().bits() == 0 && adc_guard > 0 {
+        adc_guard -= 1;
     }
 
     saadc.events_end.write(|w| unsafe { w.bits(0) });
     saadc.tasks_sample.write(|w| unsafe { w.bits(1) });
-    while saadc.events_end.read().bits() == 0 {
-        cortex_m::asm::nop();
+    adc_guard = 50_000;
+    while saadc.events_end.read().bits() == 0 && adc_guard > 0 {
+        adc_guard -= 1;
     }
 
     saadc.events_stopped.write(|w| unsafe { w.bits(0) });
     saadc.tasks_stop.write(|w| unsafe { w.bits(1) });
-    while saadc.events_stopped.read().bits() == 0 {
-        cortex_m::asm::nop();
+    adc_guard = 50_000;
+    while saadc.events_stopped.read().bits() == 0 && adc_guard > 0 {
+        adc_guard -= 1;
     }
     saadc.enable.write(|w| w.enable().disabled());
 
@@ -454,13 +471,14 @@ impl PdmMicDriver {
     }
 
     /// Enable `P1.10` (`MIC_PWR`) with High Drive (`H0H1`) and configure `NRF_PDM` at 16 kHz mono.
-    pub fn init(
+    pub fn init_with_poll<F: FnMut()>(
         &mut self,
         p0: &P0,
         p1: &P1,
         pdm: &PDM,
         timer: &mut MonotonicTimer,
         timer0: &TIMER0,
+        poll_fn: F,
     ) {
         // 1. Power up MIC_PWR (P1.10) with H0H1 high drive
         p1.outset.write(|w| unsafe { w.bits(1 << Self::PIN_MIC_PWR_P1) });
@@ -474,7 +492,7 @@ impl PdmMicDriver {
                 .drive()
                 .h0h1()
         });
-        timer.delay_ms(timer0, 30);
+        timer.delay_ms_with_poll(timer0, 30, poll_fn);
 
         // 2. Configure PDM_CLK (P1.00) as output and PDM_DIN (P0.16) as input
         p1.pin_cnf[Self::PIN_PDM_CLK_P1].write(|w| {
@@ -530,8 +548,13 @@ impl PdmMicDriver {
     }
 
     /// Capture a single 80-sample (`5 ms` @ 16 kHz) PCM frame via EasyDMA.
-    /// Returns `true` if DMA completed within timeout.
-    pub fn capture_frame(&mut self, pdm: &PDM, buf: &mut [i16; PDM_FRAME_SAMPLES]) -> bool {
+    /// Runs `poll_fn` continuously while waiting for DMA completion to maintain microsecond USB latency.
+    pub fn capture_frame_with_poll<F: FnMut()>(
+        &mut self,
+        pdm: &PDM,
+        buf: &mut [i16; PDM_FRAME_SAMPLES],
+        mut poll_fn: F,
+    ) -> bool {
         if !self.is_running {
             pdm.enable.write(|w| w.enable().enabled());
             self.is_running = true;
@@ -554,6 +577,7 @@ impl PdmMicDriver {
         // 80 samples @ 16 kHz takes 5.0 ms; allow up to ~25 ms (~400,000 loops)
         let mut guard: u32 = 400_000;
         while pdm.events_end.read().bits() == 0 {
+            poll_fn();
             guard -= 1;
             if guard == 0 {
                 pdm.tasks_stop.write(|w| unsafe { w.bits(1) });
@@ -568,6 +592,12 @@ impl PdmMicDriver {
         }
         cortex_m::asm::dsb();
         true
+    }
+
+    /// Capture a single 80-sample PCM frame without background polling.
+    #[allow(dead_code)]
+    pub fn capture_frame(&mut self, pdm: &PDM, buf: &mut [i16; PDM_FRAME_SAMPLES]) -> bool {
+        self.capture_frame_with_poll(pdm, buf, || {})
     }
 
     /// Cleanly stop PDM peripheral before entering sleep (saves ~1.5 mA).
@@ -609,13 +639,14 @@ impl Lsm6ds3ImuDriver {
 
     /// Power up `P1.08` (`IMU_PWR` with `H0H1` high drive), configure `TWIM0` at 400 kHz,
     /// verify `WHO_AM_I == 0x6A`, and start 416 Hz accelerometer + gyro.
-    pub fn init(
+    pub fn init_with_poll<F: FnMut()>(
         &mut self,
         p0: &P0,
         p1: &P1,
         twim0: &TWIM0,
         timer: &mut MonotonicTimer,
         timer0: &TIMER0,
+        mut poll_fn: F,
     ) -> Result<u8, &'static str> {
         // 1. Enable P1.08 (IMU_PWR) with H0H1 high drive + 80 ms boot time
         p1.outset.write(|w| unsafe { w.bits(1 << Self::PIN_IMU_PWR_P1) });
@@ -629,7 +660,7 @@ impl Lsm6ds3ImuDriver {
                 .drive()
                 .h0h1()
         });
-        timer.delay_ms(timer0, 80);
+        timer.delay_ms_with_poll(timer0, 80, &mut poll_fn);
 
         // Configure INT1 (P0.11) as input
         p0.pin_cnf[Self::PIN_INT1_P0].write(|w| {
@@ -697,7 +728,7 @@ impl Lsm6ds3ImuDriver {
         self.write_reg(twim0, REG_CTRL3_C, 0x44)?;
         self.write_reg(twim0, REG_CTRL1_XL, 0x68)?;
         self.write_reg(twim0, REG_CTRL2_G, 0x60)?;
-        timer.delay_ms(timer0, 20);
+        timer.delay_ms_with_poll(timer0, 20, &mut poll_fn);
 
         Ok(found_who)
     }
@@ -835,3 +866,122 @@ impl Lsm6ds3ImuDriver {
         let _ = self.write_reg(twim0, REG_CTRL2_G, 0x60);
     }
 }
+
+/// Bare-Metal 2.4 GHz Bluetooth Low Energy (BLE 1 Mbps) Advertiser Driver (`NRF_RADIO`).
+///
+/// Transmits non-connectable undirected advertising (`ADV_NONCONN_IND`) packets across
+/// primary BLE advertising channels 37 (2402 MHz), 38 (2426 MHz), and 39 (2480 MHz)
+/// using EasyDMA, broadcasting BTHome v2 (`UUID 0xFCD2`) tempo frames for Android Sensor Logger.
+pub struct BleRadioDriver {
+    pub mac: [u8; 6],
+    pub tx_count: u32,
+}
+
+impl BleRadioDriver {
+    pub const fn new() -> Self {
+        Self {
+            mac: [0; 6],
+            tx_count: 0,
+        }
+    }
+
+    /// Initialize `NRF_RADIO` for BLE 1 Mbps advertising and read the factory device address from `FICR`.
+    pub fn init(&mut self, radio: &RADIO, ficr: &FICR) {
+        let addr0 = ficr.deviceaddr[0].read().bits();
+        let addr1 = ficr.deviceaddr[1].read().bits();
+        self.mac = format_random_static_mac(addr0, addr1);
+
+        // Power on radio peripheral and configure for BLE 1Mbit
+        radio.power.write(|w| w.power().enabled());
+        radio.mode.write(|w| w.mode().ble_1mbit());
+        // +4 dBm transmit power for strong indoor range to Android phones
+        radio.txpower.write(|w| w.txpower().pos4d_bm());
+
+        // BLE Advertising Access Address = 0x8E89BED6
+        // With BALEN = 3 (3 base address bytes + 1 prefix byte):
+        // BASE0 uses the upper 24 bits of the 32-bit register: 0x89BED600
+        // PREFIX0.AP0 holds the MSB byte: 0x8E
+        radio.base0.write(|w| unsafe { w.bits(0x89BE_D600) });
+        radio.prefix0.write(|w| unsafe { w.ap0().bits(0x8E) });
+        radio.txaddress.write(|w| unsafe { w.txaddress().bits(0) });
+
+        // PCNF0: S0 = 1 byte, LENGTH = 8 bits, S1 = 0 bits, Preamble = 8-bit
+        radio.pcnf0.write(|w| unsafe {
+            w.s0len()
+                .set_bit()
+                .lflen()
+                .bits(8)
+                .s1len()
+                .bits(0)
+                .plen()
+                ._8bit()
+        });
+
+        // PCNF1: MAXLEN = 37 bytes, STATLEN = 0, BALEN = 3, Little Endian, Data Whitening Enabled
+        radio.pcnf1.write(|w| unsafe {
+            w.maxlen()
+                .bits(37)
+                .statlen()
+                .bits(0)
+                .balen()
+                .bits(3)
+                .endian()
+                .little()
+                .whiteen()
+                .enabled()
+        });
+
+        // 24-bit BLE CRC: 3 bytes, skip access address, polynomial 0x00065B, init 0x555555
+        radio
+            .crccnf
+            .write(|w| w.len().three().skipaddr().skip());
+        radio.crcpoly.write(|w| unsafe { w.crcpoly().bits(0x00065B) });
+        radio.crcinit.write(|w| unsafe { w.crcinit().bits(0x555555) });
+
+        // Fast ramp-up mode + hardware shortcuts: READY -> START and END -> DISABLE
+        radio.modecnf0.write(|w| w.ru().fast().dtx().center());
+        radio
+            .shorts
+            .write(|w| w.ready_start().enabled().end_disable().enabled());
+    }
+
+    /// Broadcast the current tempo (`bpm`) across BLE advertising channels 37, 38, and 39.
+    /// Total transmit time across all 3 channels with fast ramp-up is ~950 microseconds.
+    pub fn broadcast_tempo(&mut self, radio: &RADIO, bpm: f32) {
+        let (pdu, _len): ([u8; MAX_BLE_PDU_LEN], usize) = build_tempo_adv_pdu(self.mac, bpm);
+
+        radio
+            .packetptr
+            .write(|w| unsafe { w.bits(pdu.as_ptr() as u32) });
+
+        for &(chan, freq_offset_mhz) in &BLE_ADV_CHANNELS {
+            radio
+                .frequency
+                .write(|w| unsafe { w.frequency().bits(freq_offset_mhz) });
+            radio
+                .datawhiteiv
+                .write(|w| unsafe { w.datawhiteiv().bits(chan) });
+
+            radio.events_disabled.write(|w| unsafe { w.bits(0) });
+            cortex_m::asm::dsb();
+            radio.tasks_txen.write(|w| unsafe { w.bits(1) });
+
+            // Wait for READY -> START -> END -> DISABLED (~300 us per channel)
+            let mut guard: u32 = 40_000;
+            while radio.events_disabled.read().bits() == 0 && guard > 0 {
+                guard -= 1;
+            }
+            if guard == 0 {
+                radio.tasks_disable.write(|w| unsafe { w.bits(1) });
+                let mut stop_guard: u32 = 10_000;
+                while radio.events_disabled.read().bits() == 0 && stop_guard > 0 {
+                    stop_guard -= 1;
+                }
+            }
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+
+        self.tx_count = self.tx_count.wrapping_add(1);
+    }
+}
+

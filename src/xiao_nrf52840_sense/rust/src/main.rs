@@ -4,9 +4,9 @@
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 
-use cortex_m_rt::entry;
+use cortex_m_rt::{entry, exception, ExceptionFrame};
 use nrf52840_hal::clocks::Clocks;
-use nrf52840_hal::pac::{self, P0, P1, PDM, POWER, SAADC, SCB, TEMP, TIMER0, TWIM0, WDT};
+use nrf52840_hal::pac::{self, FICR, NVIC, P0, P1, PDM, POWER, RADIO, SAADC, SCB, TEMP, TIMER0, TWIM0, WDT};
 use nrf52840_hal::usbd::{UsbPeripheral, Usbd};
 use usb_device::class_prelude::UsbBusAllocator;
 use usb_device::device::{StringDescriptors, UsbDevice, UsbDeviceBuilder, UsbVidPid};
@@ -20,12 +20,15 @@ use ai_metronome_rust::mode_engine::{LedColor, MetronomeMode, MetronomeModeEngin
 mod hardware;
 use hardware::{
     feed_watchdog, init_watchdog, read_and_clear_reset_reason,
-    read_power_diagnostics, reboot_to_uf2_bootloader, Lsm6ds3ImuDriver, MonotonicTimer,
-    PdmMicDriver, RgbLedController, PDM_FRAME_SAMPLES,
+    read_power_diagnostics, reboot_to_uf2_bootloader, BleRadioDriver, Lsm6ds3ImuDriver,
+    MonotonicTimer, PdmMicDriver, RgbLedController, PDM_FRAME_SAMPLES,
 };
 
 /// Top 256 bytes of SRAM (`0x2003FF00`) reserved in `memory.x` for retained crash log across resets.
 const CRASH_LOG_PTR: *mut RetainedCrashLog = 0x2003_FF00 as *mut RetainedCrashLog;
+/// Clean-boot trampoline word in retained SRAM (`0x2003FEFC`) to force a one-shot hardware reset after UF2 jump.
+const CLEAN_BOOT_FLAG_PTR: *mut u32 = 0x2003_FEFC as *mut u32;
+const CLEAN_BOOT_MAGIC: u32 = 0xB007_C1EA;
 
 /// Fixed-capacity stack string buffer implementing `core::fmt::Write` for zero-heap USB formatting.
 pub struct LineBuf<const N: usize> {
@@ -100,6 +103,51 @@ fn panic(info: &PanicInfo) -> ! {
     SCB::sys_reset()
 }
 
+/// Custom HardFault handler: records the exception program counter (`pc`) and link register (`lr`)
+/// into retained SRAM (`0x2003FF00`), blinks Red/Blue SOS, and performs a clean soft reset.
+#[exception]
+unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
+    let mut msg_buf = LineBuf::<180>::new();
+    let _ = write!(
+        msg_buf,
+        "HardFault pc=0x{:08X} lr=0x{:08X} xpsr=0x{:08X}",
+        ef.pc(),
+        ef.lr(),
+        ef.xpsr()
+    );
+    let crash_log = &mut *CRASH_LOG_PTR;
+    crash_log.record(msg_buf.as_bytes(), ef.pc());
+
+    let p0 = &*P0::ptr();
+    let mut led = RgbLedController::new();
+    led.init(p0);
+    for _ in 0..8 {
+        led.set_color(p0, LedColor::Red);
+        for _ in 0..600_000 {
+            cortex_m::asm::nop();
+        }
+        led.set_color(p0, LedColor::Blue);
+        for _ in 0..600_000 {
+            cortex_m::asm::nop();
+        }
+    }
+    led.off(p0);
+    SCB::sys_reset()
+}
+
+/// Default handler for any unexpected core exception or peripheral interrupt.
+/// Instead of spinning in cortex-m-rt's default loop, clears pending NVIC state so main execution continues.
+#[exception]
+unsafe fn DefaultHandler(_irqn: i16) {
+    (*cortex_m::peripheral::SYST::PTR).csr.write(0);
+    (*SCB::PTR).icsr.write((1 << 25) | (1 << 27));
+    let nvic = &*NVIC::PTR;
+    for i in 0..8 {
+        nvic.icer[i].write(0xFFFF_FFFF);
+        nvic.icpr[i].write(0xFFFF_FFFF);
+    }
+}
+
 /// Poll USB CDC, check for 1200-baud bootloader touch, and read any incoming command byte.
 fn poll_usb_and_read_cmd<'a>(
     usb_dev: &mut UsbDevice<'a, Usbd<UsbPeripheral<'a>>>,
@@ -147,10 +195,10 @@ fn usb_send_bytes<'a>(
     data: &[u8],
 ) {
     let _ = usb_dev.poll(&mut [serial]);
-    if !serial.dtr() {
-        // Still attempt a single non-blocking write into the USB endpoint FIFO
-        let _ = serial.write(data);
-        let _ = usb_dev.poll(&mut [serial]);
+    // Do NOT call serial.write() until USB enumeration has completed (`Configured` state)
+    // and the host terminal has asserted DTR. Writing to EP1 IN during enumeration
+    // stalls the nRF52840 USBD peripheral!
+    if usb_dev.state() != usb_device::device::UsbDeviceState::Configured || !serial.dtr() {
         return;
     }
 
@@ -182,12 +230,15 @@ fn run_and_print_self_test<'a>(
     temp: &TEMP,
     pdm: &PDM,
     twim0: &TWIM0,
+    radio: &RADIO,
+    ficr: &FICR,
     wdt: &WDT,
     timer: &mut MonotonicTimer,
     timer0: &TIMER0,
     led: &mut RgbLedController,
     mic: &mut PdmMicDriver,
     imu: &mut Lsm6ds3ImuDriver,
+    ble: &mut BleRadioDriver,
     click_detector: &mut ClickDetector,
     mode_engine: &MetronomeModeEngine,
     reset_reason: &str,
@@ -263,13 +314,15 @@ fn run_and_print_self_test<'a>(
     line.clear();
     let _ = writeln!(
         line,
-        "  [DIAG] Memory / Storage : 240.0 KB RAM | 944.0 KB Flash"
+        "  [DIAG] Memory / Storage : 231.8 KB RAM | 792.0 KB Flash"
     );
     usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
 
     // 2. PDM Microphone Init & DMA Check ([MIC])
     feed_watchdog(wdt);
-    mic.init(p0, p1, pdm, timer, timer0);
+    mic.init_with_poll(p0, p1, pdm, timer, timer0, || {
+        let _ = usb_dev.poll(&mut [serial]);
+    });
     line.clear();
     let _ = writeln!(
         line,
@@ -278,10 +331,16 @@ fn run_and_print_self_test<'a>(
     usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
 
     let mut audio_buf = [0i16; PDM_FRAME_SAMPLES];
-    // Discard 2 warmup frames for DC filter settling
-    let _ = mic.capture_frame(pdm, &mut audio_buf);
-    let _ = mic.capture_frame(pdm, &mut audio_buf);
-    let dma_ok = mic.capture_frame(pdm, &mut audio_buf);
+    // Discard 2 warmup frames for DC filter settling while keeping USB polled
+    let _ = mic.capture_frame_with_poll(pdm, &mut audio_buf, || {
+        let _ = usb_dev.poll(&mut [serial]);
+    });
+    let _ = mic.capture_frame_with_poll(pdm, &mut audio_buf, || {
+        let _ = usb_dev.poll(&mut [serial]);
+    });
+    let dma_ok = mic.capture_frame_with_poll(pdm, &mut audio_buf, || {
+        let _ = usb_dev.poll(&mut [serial]);
+    });
 
     let mut s_min: i16 = i16::MAX;
     let mut s_max: i16 = i16::MIN;
@@ -313,7 +372,9 @@ fn run_and_print_self_test<'a>(
 
     // 3. IMU Init & Self-Test ([IMU])
     feed_watchdog(wdt);
-    match imu.init(p0, p1, twim0, timer, timer0) {
+    match imu.init_with_poll(p0, p1, twim0, timer, timer0, || {
+        let _ = usb_dev.poll(&mut [serial]);
+    }) {
         Ok(who) => {
             line.clear();
             let _ = writeln!(
@@ -349,6 +410,18 @@ fn run_and_print_self_test<'a>(
         }
     }
 
+    // 3b. BLE 2.4 GHz Radio Advertiser Init & Broadcast Test ([BLE])
+    feed_watchdog(wdt);
+    ble.init(radio, ficr);
+    ble.broadcast_tempo(radio, mode_engine.bpm());
+    line.clear();
+    let _ = writeln!(
+        line,
+        "  [BLE]  Advertiser       : Active (Name=\"AI-METRO\", BTHome v2 UUID=0xFCD2, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
+        ble.mac[5], ble.mac[4], ble.mac[3], ble.mac[2], ble.mac[1], ble.mac[0]
+    );
+    usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
+
     // 4. Ambient Noise Calibration ([CAL] - 25 frames, outlier-resistant lower tertile)
     feed_watchdog(wdt);
     line.clear();
@@ -360,10 +433,11 @@ fn run_and_print_self_test<'a>(
 
     let mut cal_peaks = [0i32; 25];
     for i in 0..25 {
-        let _ = mic.capture_frame(pdm, &mut audio_buf);
+        let _ = mic.capture_frame_with_poll(pdm, &mut audio_buf, || {
+            let _ = usb_dev.poll(&mut [serial]);
+        });
         let (hp_peak, _, _, _) = ClickDetector::compute_hp_stats(&audio_buf);
         cal_peaks[i] = hp_peak;
-        let _ = usb_dev.poll(&mut [serial]);
     }
     let floor = click_detector.calibrate_from_peaks(&cal_peaks);
     let trig_thresh = click_detector.current_threshold();
@@ -376,9 +450,21 @@ fn run_and_print_self_test<'a>(
     );
     usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
 
-    // 5. Signal Ready (3 Green LED Blinks + [READY] Banner)
+    // 5. Signal Ready (3 Green LED Blinks while polling USB + [READY] Banner)
     feed_watchdog(wdt);
-    led.signal_init_ok(p0, timer, timer0);
+    led.off(p0);
+    for _ in 0..3 {
+        led.set_color(p0, LedColor::Green);
+        let t0 = timer.now_us(timer0);
+        while timer.now_us(timer0).wrapping_sub(t0) < 90_000 {
+            let _ = usb_dev.poll(&mut [serial]);
+        }
+        led.off(p0);
+        let t1 = timer.now_us(timer0);
+        while timer.now_us(timer0).wrapping_sub(t1) < 90_000 {
+            let _ = usb_dev.poll(&mut [serial]);
+        }
+    }
 
     line.clear();
     let _ = writeln!(
@@ -398,16 +484,40 @@ fn run_and_print_self_test<'a>(
     line.clear();
     let _ = writeln!(
         line,
-        "[DEBUG] Serial Keys: '1'..'4'=Mode, 'd'=Dump State, 'r'=Self-Test, 'z'=Sleep, 'b'=Bootloader\r\n"
+        "[DEBUG] Serial Keys: '1'..'4'=Mode, 'm'=Cycle Mode, 'd'/'s'=Dump State, 'r'=Self-Test, 'z'=Sleep, 'b'=Bootloader\r\n"
     );
     usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
 }
 
 #[entry]
 fn main() -> ! {
-    // 1. Ensure Cortex-M4F Vector Table Offset Register points to our application flash origin (0x00001000)
+    // 1. Immediately stop FreeRTOS SysTick, clear pending SysTick/PendSV in SCB->ICSR,
+    //    mask all NVIC interrupts left enabled by the UF2 bootloader (TinyUSB USBD / TIMER / POWER IRQs),
+    //    and set VTOR to our flash origin (0x00027000).
+    //    Keep interrupts disabled (PRIMASK = 1): all our drivers are non-interrupt polling!
     unsafe {
-        (*SCB::PTR).vtor.write(0x0000_1000);
+        cortex_m::interrupt::disable();
+        (*cortex_m::peripheral::SYST::PTR).csr.write(0);
+        (*SCB::PTR).icsr.write((1 << 25) | (1 << 27));
+        let nvic = &*NVIC::PTR;
+        for i in 0..8 {
+            nvic.icer[i].write(0xFFFF_FFFF);
+            nvic.icpr[i].write(0xFFFF_FFFF);
+        }
+        (*SCB::PTR).vtor.write(0x0002_7000);
+        cortex_m::asm::dsb();
+        cortex_m::asm::isb();
+
+        // After UF2 flashing, the bootloader jumps here without a hardware reset,
+        // leaving NRF_USBD dirty from TinyUSB. A single SCB::sys_reset() resets all
+        // peripherals cleanly; the bootloader then skips TinyUSB and jumps right back!
+        if core::ptr::read_volatile(CLEAN_BOOT_FLAG_PTR) != CLEAN_BOOT_MAGIC {
+            core::ptr::write_volatile(CLEAN_BOOT_FLAG_PTR, CLEAN_BOOT_MAGIC);
+            cortex_m::asm::delay(12_800_000);
+            cortex_m::asm::dsb();
+            SCB::sys_reset();
+        }
+        core::ptr::write_volatile(CLEAN_BOOT_FLAG_PTR, 0);
     }
 
     let dp = pac::Peripherals::take().unwrap();
@@ -421,43 +531,16 @@ fn main() -> ! {
     let reset_reason = read_and_clear_reset_reason(&dp.POWER);
     init_watchdog(&dp.WDT);
 
-    // 4. Safely initialize Clocks without blocking indefinitely if oscillators were pre-started by bootloader
-    if dp.CLOCK.hfclkstat.read().state().is_not_running() {
-        dp.CLOCK.tasks_hfclkstart.write(|w| unsafe { w.bits(1) });
-        let mut timeout = 2_000_000;
-        while dp.CLOCK.events_hfclkstarted.read().bits() == 0 && timeout > 0 {
-            timeout -= 1;
-        }
-    }
-    dp.CLOCK.events_hfclkstarted.write(|w| unsafe { w.bits(1) });
-
-    if dp.CLOCK.lfclkstat.read().state().is_not_running() {
-        dp.CLOCK.lfclksrc.write(|w| w.src().rc());
-        dp.CLOCK.tasks_lfclkstart.write(|w| unsafe { w.bits(1) });
-        let mut timeout = 2_000_000;
-        while dp.CLOCK.events_lfclkstarted.read().bits() == 0 && timeout > 0 {
-            timeout -= 1;
-        }
-    }
-    dp.CLOCK.events_lfclkstarted.write(|w| unsafe { w.bits(1) });
-
-    let clocks = Clocks::new(dp.CLOCK)
-        .enable_ext_hfosc()
-        .start_lfclk();
+    // 4. Clocks initialization per official nrf52840-hal USBD specification:
+    //    Enable external 32 MHz crystal oscillator (strictly required for USB full-speed PHY)
+    let clocks = Clocks::new(dp.CLOCK).enable_ext_hfosc();
 
     let mut timer = MonotonicTimer::new();
     timer.init(&dp.TIMER0);
+    feed_watchdog(&dp.WDT);
 
-    // 5. Wait for USB 3.3V power supply regulator if VBUS is connected
-    let mut reg_guard = 500_000;
-    while dp.POWER.usbregstatus.read().vbusdetect().is_vbus_present()
-        && !dp.POWER.usbregstatus.read().outputrdy().is_ready()
-        && reg_guard > 0
-    {
-        reg_guard -= 1;
-    }
-
-    // 6. Initialize Native USB CDC Serial (Seeed VID 0x2886, PID 0x0045)
+    // 5. Initialize Native USB CDC Serial FIRST (with mandatory max_packet_size_0(64))
+    //    and poll in a pure zero-delay loop until Windows completes USB enumeration!
     let usb_bus = UsbBusAllocator::new(Usbd::new(UsbPeripheral::new(dp.USBD, &clocks)));
     let mut serial = SerialPort::new(&usb_bus);
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x2886, 0x0045))
@@ -471,23 +554,31 @@ fn main() -> ! {
         .unwrap()
         .build();
 
-    // Poll USB for ~600 ms so Windows enumerates COM9 before startup self-test runs
     let boot_start_us = timer.now_us(&dp.TIMER0);
     let mut was_1200_armed = false;
-    while timer.now_us(&dp.TIMER0).wrapping_sub(boot_start_us) < 600_000 {
+    let mut configured_since_us: Option<u64> = None;
+    while timer.now_us(&dp.TIMER0).wrapping_sub(boot_start_us) < 1_500_000 {
         let _ = poll_usb_and_read_cmd(&mut usb_dev, &mut serial, &dp.POWER, &mut was_1200_armed);
         feed_watchdog(&dp.WDT);
+        if usb_dev.state() == usb_device::device::UsbDeviceState::Configured {
+            match configured_since_us {
+                None => configured_since_us = Some(timer.now_us(&dp.TIMER0)),
+                Some(t0) if timer.now_us(&dp.TIMER0).wrapping_sub(t0) > 150_000 => break,
+                _ => {}
+            }
+        }
     }
 
-    // 6. Initialize Drivers & Core DSP / PLL / Gesture / Sleep State Machines
+    // 6. Initialize Sensor Drivers & Run Hardware Self-Test / Calibration
     let mut mic = PdmMicDriver::new();
     let mut imu = Lsm6ds3ImuDriver::new();
+    let mut ble = BleRadioDriver::new();
     let mut click_detector = ClickDetector::new();
     let mut mode_engine = MetronomeModeEngine::new(); // Always starts in Mode 1 (ON_BEAT, Red)
     let mut shake_classifier = ShakeModeClassifier::new();
     let mut sleep_controller = SleepWakeController::new();
+    let mut audio_buf = [0i16; PDM_FRAME_SAMPLES];
 
-    // Run full hardware self-test & calibration
     run_and_print_self_test(
         &mut usb_dev,
         &mut serial,
@@ -497,12 +588,15 @@ fn main() -> ! {
         &dp.TEMP,
         &dp.PDM,
         &dp.TWIM0,
+        &dp.RADIO,
+        &dp.FICR,
         &dp.WDT,
         &mut timer,
         &dp.TIMER0,
         &mut led,
         &mut mic,
         &mut imu,
+        &mut ble,
         &mut click_detector,
         &mode_engine,
         reset_reason,
@@ -511,9 +605,9 @@ fn main() -> ! {
     let init_now_sec = timer.now_sec(&dp.TIMER0);
     sleep_controller.notify_activity(init_now_sec);
 
-    let mut audio_buf = [0i16; PDM_FRAME_SAMPLES];
     let mut last_imu_poll_sec = init_now_sec;
-    let mut last_dtr = serial.dtr();
+    let mut last_ble_adv_sec = init_now_sec;
+    let mut last_dtr = false;
     let mut dtr_banner_replayed = false;
     let mut last_accel = (0.0f32, 0.0f32, 1.0f32);
     let mut last_dyn_g = 0.0f32;
@@ -548,12 +642,15 @@ fn main() -> ! {
                 &dp.TEMP,
                 &dp.PDM,
                 &dp.TWIM0,
+                &dp.RADIO,
+                &dp.FICR,
                 &dp.WDT,
                 &mut timer,
                 &dp.TIMER0,
                 &mut led,
                 &mut mic,
                 &mut imu,
+                &mut ble,
                 &mut click_detector,
                 &mode_engine,
                 reset_reason,
@@ -562,8 +659,15 @@ fn main() -> ! {
         }
         last_dtr = curr_dtr;
 
-        // A. Capture 80-sample (5 ms @ 16 kHz) PDM frame via EasyDMA
-        let _ = mic.capture_frame(&dp.PDM, &mut audio_buf);
+        // A. Capture 80-sample (5 ms @ 16 kHz) PDM frame via EasyDMA while keeping USB polled
+        let mut loop_cmd: Option<u8> = None;
+        let _ = mic.capture_frame_with_poll(&dp.PDM, &mut audio_buf, || {
+            if let Some(cmd) =
+                poll_usb_and_read_cmd(&mut usb_dev, &mut serial, &dp.POWER, &mut was_1200_armed)
+            {
+                loop_cmd = Some(cmd);
+            }
+        });
         frame_counter = frame_counter.wrapping_add(1);
         let now_sec = timer.now_sec(&dp.TIMER0);
 
@@ -575,6 +679,8 @@ fn main() -> ! {
         if click_ev.is_click {
             if let Some(flash) = mode_engine.register_click(click_ev.onset_time_sec) {
                 led.start_flash(&dp.P0, flash.color, flash.brightness, now_sec);
+                ble.broadcast_tempo(&dp.RADIO, flash.bpm);
+                last_ble_adv_sec = now_sec;
                 line.clear();
                 let _ = writeln!(
                     line,
@@ -590,6 +696,8 @@ fn main() -> ! {
                 );
                 usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
             } else {
+                ble.broadcast_tempo(&dp.RADIO, mode_engine.bpm());
+                last_ble_adv_sec = now_sec;
                 line.clear();
                 let _ = writeln!(
                     line,
@@ -612,6 +720,8 @@ fn main() -> ! {
         let now_pll_sec = timer.now_sec(&dp.TIMER0);
         if let Some(sched_flash) = mode_engine.poll(now_pll_sec) {
             led.start_flash(&dp.P0, sched_flash.color, sched_flash.brightness, now_pll_sec);
+            ble.broadcast_tempo(&dp.RADIO, sched_flash.bpm);
+            last_ble_adv_sec = now_pll_sec;
             let tag = if sched_flash.is_upbeat {
                 "UPBEAT"
             } else {
@@ -630,11 +740,18 @@ fn main() -> ! {
             usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
         }
 
+        // C2. Periodic BLE tempo advertisement every 200 ms (5 Hz) so Android Sensor Logger tracks smoothly
+        if (now_pll_sec - last_ble_adv_sec) >= 0.200 {
+            last_ble_adv_sec = now_pll_sec;
+            ble.broadcast_tempo(&dp.RADIO, mode_engine.bpm());
+        }
+
         // D. Poll USB Serial for debug & HIL commands
         let mut force_sleep = false;
-        if let Some(cmd) =
+        let active_cmd = loop_cmd.or_else(|| {
             poll_usb_and_read_cmd(&mut usb_dev, &mut serial, &dp.POWER, &mut was_1200_armed)
-        {
+        });
+        if let Some(cmd) = active_cmd {
             match cmd {
                 b'1' | b'2' | b'3' | b'4' => {
                     let target_mode = MetronomeMode::from_u8(cmd - b'0');
@@ -648,13 +765,24 @@ fn main() -> ! {
                         target_mode.name()
                     );
                     usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
-                    led.signal_mode_change(
-                        &dp.P0,
-                        &mut timer,
-                        &dp.TIMER0,
-                        target_mode as u8,
-                        target_mode.confirm_color(),
+                    if !mode_engine.is_locked {
+                        led.start_flash(&dp.P0, target_mode.confirm_color(), 1.0, now_sec);
+                    }
+                }
+                b'm' | b'M' => {
+                    let new_mode = mode_engine.cycle_mode();
+                    sleep_controller.notify_activity(now_sec);
+                    line.clear();
+                    let _ = writeln!(
+                        line,
+                        "[SERIAL] Cycled to Mode {}: {}",
+                        new_mode as u8,
+                        new_mode.name()
                     );
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                    if !mode_engine.is_locked {
+                        led.start_flash(&dp.P0, new_mode.confirm_color(), 1.0, now_sec);
+                    }
                 }
                 b'z' | b'Z' => {
                     force_sleep = true;
@@ -670,19 +798,22 @@ fn main() -> ! {
                         &dp.TEMP,
                         &dp.PDM,
                         &dp.TWIM0,
+                        &dp.RADIO,
+                        &dp.FICR,
                         &dp.WDT,
                         &mut timer,
                         &dp.TIMER0,
                         &mut led,
                         &mut mic,
                         &mut imu,
+                        &mut ble,
                         &mut click_detector,
                         &mode_engine,
                         reset_reason,
                     );
                     sleep_controller.notify_activity(timer.now_sec(&dp.TIMER0));
                 }
-                b'd' | b'D' => {
+                b'd' | b'D' | b's' | b'S' => {
                     let pwr = read_power_diagnostics(
                         &dp.P0,
                         &dp.SAADC,
@@ -717,6 +848,15 @@ fn main() -> ! {
                         mode_engine.is_locked,
                         mode_engine.bpm(),
                         mode_engine.beat_index
+                    );
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+
+                    line.clear();
+                    let _ = writeln!(
+                        line,
+                        "  BLE  : Name=\"AI-METRO\", BTHome=0xFCD2, Broadcasts={}, Tempo={:.2} BPM",
+                        ble.tx_count,
+                        mode_engine.bpm()
                     );
                     usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
 
@@ -768,22 +908,16 @@ fn main() -> ! {
                     line.clear();
                     let _ = writeln!(
                         line,
-                        "[GESTURE: {}] Mode -> {}: {} (Confirming: White Burst + {}x {})",
+                        "[GESTURE: {}] Mode -> {}: {}",
                         gesture.as_str(),
                         new_mode as u8,
-                        new_mode.name(),
-                        new_mode as u8,
-                        new_mode.confirm_color().as_str()
+                        new_mode.name()
                     );
                     usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
 
-                    led.signal_mode_change(
-                        &dp.P0,
-                        &mut timer,
-                        &dp.TIMER0,
-                        new_mode as u8,
-                        new_mode.confirm_color(),
-                    );
+                    if !mode_engine.is_locked {
+                        led.start_flash(&dp.P0, new_mode.confirm_color(), 1.0, now_sec);
+                    }
                 } else {
                     if mode_engine.is_locked {
                         sleep_controller.notify_activity(now_sec);

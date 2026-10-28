@@ -1,237 +1,117 @@
 # ai-metronome
 
-`ai-metronome` is an intelligent, embedded acoustic-synchronizing companion designed for musicians. Rather than replacing the beloved mechanical presence and tactile rhythm of a traditional physical metronome, `ai-metronome` augments it: listening to physical escapement clicks in real time through an onboard digital MEMS microphone, locking onto the tempo with an autonomous Phase-Locked Loop (PLL) beat clock, and providing precise, jitter-free visual and meter feedback.
-
-The system is engineered to sit directly on or inside a physical metronome enclosure—even when perched atop an actively played piano. By leveraging physical proximity, enclosure resonance advantages, and intelligent digital signal processing (band-limited transient filtering, attack-slope gating, and adaptive noise tracking), the firmware isolates sharp mechanical tick transients from ambient music, room reverberation, and polyphonic piano chords.
-
-With an internal PLL oscillator driving LED timing, visual pulses remain rock-solid and impervious to frame-level software latency or occasional acoustic dropouts. The device supports multiple musical timing modes—such as on-beat synchronization, upbeat/in-between pulses, and measure downbeat accents for 4/4 and 3/4 meters—all without requiring screens, menus, or external buttons.
+`ai-metronome` is an embedded acoustic-synchronizing companion for musicians running on the **Seeed Studio XIAO nRF52840 Sense** in **Embedded Rust (`no_std`)**. Rather than replacing a traditional physical metronome, it augments it: listening to physical escapement clicks via the onboard 16 kHz digital PDM MEMS microphone, locking onto the tempo with an autonomous Phase-Locked Loop (PLL) beat clock, flashing synchronized visual cues across 4 rhythm modes, and broadcasting real-time tempo telemetry over **Bluetooth Low Energy (BLE BTHome v2)** to Android **Sensor Logger**.
 
 ---
 
-## Operating Modes & Gesture Switching
+## Core Features & Operating Modes
 
-The metronome features a streamlined 4-mode visual timing engine. It requires zero extra hardware, wires, or pushbuttons—mode selection is controlled entirely through the onboard 6-axis inertial measurement unit (IMU).
+### 1. Continuous Freewheeling (Flywheel) PLL Beat Clock
+- **Outlier-Resistant Noise Floor Calibration**: Samples 25 startup frames and uses the lower-tertile peak so ambient sounds during boot never blind the detector.
+- **Sub-Frame Onset Accuracy**: First-difference high-pass filter ($H(z)=1-z^{-1}$) with $62.5\,\mu\text{s}$ sample-index localization, crest-factor verification ($\ge 1.9$), and attack-slope gating.
+- **Continuous Flywheel Coasting**: Once locked (3 steady clicks / 2 consistent intervals), the internal PLL clock continues flashing at the exact tempo indefinitely even after sound stops, and immediately resynchronizes phase and downbeat when sound returns.
+- **Dynamic Acceleration & Deceleration**: Tracks two-click interval transitions (`prev_dt_sec`) so slowing down or speeding up adapts immediately without harmonic trapping.
 
-### How Modes Are Switched
-Mode cycling uses intuitive physical gestures detected by the onboard accelerometer:
-1. **Two Slowish Shakes**: Pick up the unit and shake it back and forth twice.
-2. **Single Firm Drop / Table Knock**: Set or tap the unit down firmly onto the table or piano surface.
+### 2. 4 Visual Rhythm Modes & Seamless Mode Switching
+Switching modes (via physical IMU gestures or USB serial commands) preserves the locked flywheel tempo and phase without pausing the beat clock:
+- **Mode 1 — On-Beat (`RED`)**: Flashes Red on every beat ($1\times$); always the default mode on reset.
+- **Mode 2 — Upbeat / In-Between (`BLUE`)**: Flashes Blue halfway between beats ($t + 0.5 \times \text{period}$).
+- **Mode 3 — 4/4 Meter (`GREEN` = 1, `RED` = 2, 3, 4)**: Bright Green downbeat on Beat 1, dimmed Red (`20%`) on Beats 2, 3, and 4.
+- **Mode 4 — 3/4 Meter (`GREEN` = 1, `RED` = 2, 3)**: Bright Green downbeat on Beat 1, dimmed Red (`20%`) on Beats 2 and 3.
+- **Pre-Lock Dimming**: All flashes are dimmed (`18%` / `12 ms` pulse) until the PLL locks onto a steady tempo.
 
-### Mode Confirmation
-Upon recognizing either gesture, the device signals an unmistakable confirmation:
-- A **350 ms Bright White burst** (all RGB diodes illuminated simultaneously).
-- A brief pause, followed by **$N$ distinct pulses** in the new mode's color to indicate the active mode number ($1$ to $4$).
-- Refractory audio timers reset automatically so the switch gesture never causes a false beat trigger.
+### 3. Dual-Gesture IMU Mode Switching & 30s Inactivity Sleep
+Polled at 50 Hz over 400 kHz I2C (`LSM6DS3TR-C` @ 416 Hz ODR):
+- **Double Shake**: Two back-and-forth hand shakes cycle to the next mode.
+- **Firm Table Tap / Drop**: A single firm tap/drop onto a table cycles to the next mode.
+- **30s Low-Power Motion Sleep**: After 30 seconds without movement or locked beats, the firmware fades the Blue LED down, powers off the PDM microphone, puts the IMU into 26 Hz low-power mode, and sleeps until movement wakes it (`2x Green` blink confirmation).
 
-### Active Mode Lineup
-- **Mode 1 — On-Beat (Red)**: Emits a crisp Red flash synchronized directly with every physical click ($1\times$).
-- **Mode 2 — Upbeat / In-Between (Blue)**: Emits a Blue flash precisely halfway between beats ($t + \frac{\text{IOI}}{2}$), ideal for practicing syncopation and subdividing time.
-- **Mode 3 — 4/4 Meter (Green)**: Emits a Green flash on Beat 1 (downbeat) and remains dark on Beats 2, 3, and 4. Auto-resets to Beat 1 after 2 seconds of silence.
-- **Mode 4 — 3/4 Meter (Green)**: Emits a Green flash on Beat 1 (downbeat) and remains dark on Beats 2 and 3. Auto-resets to Beat 1 after 2 seconds of silence.
+### 4. BLE Tempo Broadcast (`AI-METRO` / BTHome v2 `0xFCD2`)
+- Bare-metal `NRF_RADIO` 2.4 GHz `Ble_1Mbit` (+4 dBm) advertiser broadcasting across primary BLE channels **37 (2402 MHz)**, **38 (2426 MHz)**, and **39 (2480 MHz)**.
+- Transmits **BTHome v2** (`UUID = 0xFCD2`) service data packets at 5 Hz (`200 ms`) and immediately on every beat, encoding fractional BPM (`0.01 BPM` resolution via Object `0x02`) and integer BPM (Object `0x3D`) for zero-configuration graphing in Android **Sensor Logger** and **nRF Connect**.
 
 ---
 
-## Architecture & Layout
+## Repository Structure
 
 ```text
 ai-metronome/
-├── .agents/                        # Agent operating rules and workflow specifications
-│   └── skills/                     # Domain MCU skills (circuitpython, xiao, nrf52840)
-├── archive/
-│   └── puck/                       # Archived Puck.js BLE CLI/TUI prototype & tests
-├── docs/                           # Documentation and architecture design specifications
+├── .agents/skills/                 # MCU & hardware skills (nrf52840-mcu, xiao-nrf52840-sense)
+├── archive/puck/                   # Archived Puck.js prototype
+├── build/                          # Compiled UF2 & official Nordic DFU .zip images
 ├── src/
-│   ├── ai_metronome/               # Host-testable core algorithms (PDM click detector)
-│   └── xiao_nrf52840_sense/        # Target MCU firmware implementations
-│       ├── circuitpython/
-│       │   └── code.py             # Self-contained CircuitPython click detector POC
-│       ├── cpp/                    # Planned C++ firmware implementation
-│       └── rust/                   # Embedded Rust firmware implementation (no_std)
-├── tests/                          # Automated unit test suites
-├── tools/                          # Developer, CLI, and deployment utilities
-├── AGENTS.md                       # Universal agent operating guidelines
-├── JOURNAL.md                      # Chronological log & Architectural Decision Records (ADRs)
-├── PLANNING.md                     # Active backlog & sprint task tracking
-├── ROADMAP.md                      # Long-term vision and feature backlog
-├── TESTING.md                      # Testing strategy and execution guide
-├── pyproject.toml                  # Project metadata and dependencies
-└── main.py                         # Application entry point
+│   ├── ai_metronome/               # Python reference algorithms for unit testing
+│   └── xiao_nrf52840_sense/
+│       ├── rust/                   # Primary Embedded Rust Firmware (no_std, Cortex-M4F)
+│       │   ├── src/
+│       │   │   ├── bin/
+│       │   │   │   └── deploy_test.rs # Minimal USB CDC + Green LED smoke-test binary (--smoke-test)
+│       │   │   ├── lib.rs          # Platform-independent no_std library root
+│       │   │   ├── main.rs         # Bare-metal entry, clean-boot trampoline, USB CDC & 200Hz loop
+│       │   │   ├── hardware.rs     # Direct PAC drivers (PDM, TWIM0, RADIO, SAADC, TIMER0, WDT)
+│       │   │   ├── ble_advertiser.rs # Pure-Rust BLE PDU & BTHome v2 packet builder
+│       │   │   ├── click_detector.rs # First-difference HPF & outlier-resistant click detector
+│       │   │   ├── mode_engine.rs  # 4-mode continuous flywheel PLL sequencer
+│       │   │   ├── gesture.rs      # Shake/drop gesture classifier & 30s sleep controller
+│       │   │   └── crash_log.rs    # Retained SRAM (0x2003FF00) panic & HardFault logger
+│       │   ├── Cargo.toml
+│       │   └── memory.x            # S140 v7.3.0 flash (0x27000) & RAM (0x20006000) linker map
+│       └── circuitpython/          # Archived CircuitPython prototype (code.py)
+├── tests/                          # Python & UF2 packer unit tests
+├── tools/
+│   ├── xiao_cli.py                 # Rust-only build, deploy, HIL test & monitor CLI
+│   └── restore_circuitpython.py    # Standalone emergency recovery for CircuitPython prototype
+├── AGENTS.md                       # Operational rules & governance boundaries
+├── JOURNAL.md                      # Architectural Decision Records (ADRs) & project log
+├── PLANNING.md                     # Active sprint milestones & backlog
+├── ROADMAP.md                      # Long-term acoustic isolation & TinyML vision
+└── TESTING.md                      # Verification pyramid & test execution guide
 ```
 
 ---
 
-## Development & Hardware Tooling (`xiao-cli`)
+## Rust Development & Hardware Workflow (`xiao-cli`)
 
-The repository includes a dedicated Hardware-in-the-Loop (HIL) command-line utility ([`tools/xiao_cli.py`](file:///d:/projects/ai-metronome/tools/xiao_cli.py)) registered as `xiao-cli`. It automatically auto-discovers mounted `CIRCUITPY` USB drives and XIAO serial COM ports without requiring manual configuration.
+All commands run in standard Windows `cmd.exe` via `uv run xiao-cli`:
 
-Execute via `uv run xiao-cli <command>`:
-
-### 1. Device Discovery & Health Check (`status`)
-Inspect connected hardware, mounted flash drives, CircuitPython runtime version, and USB serial endpoints:
-```bash
+```cmd
+:: 1. Check XIAO-SENSE bootloader drive or Rust USB CDC serial port
 uv run xiao-cli status
-```
-*Outputs drive mount path (e.g. `D:\`), volume label, `boot_out.txt` build info, COM port (e.g. `COM9`), and USB VID/PID.*
 
-### 2. Deploying CircuitPython Firmware (`python-deploy`)
-Copies `code.py` to the mounted `CIRCUITPY` flash drive. CircuitPython automatically reloads upon file write:
-```bash
-# Push default firmware (src/xiao_nrf52840_sense/circuitpython/code.py)
-uv run xiao-cli python-deploy
+:: 2. Compile Rust firmware (thumbv7em-none-eabihf) and pack build\ai-metronome-rust.uf2
+uv run xiao-cli build
 
-# Push and immediately trigger automated hardware-in-the-loop verification
-uv run xiao-cli python-deploy --test
+:: 3. Build, flash to XIAO-SENSE, and run 7-point on-device HIL verification
+uv run xiao-cli deploy --test
 
-# Deploy a specific custom source file
-uv run xiao-cli python-deploy --file path/to/my_code.py
-```
-*(Aliases `deploy` and `push` are also supported for convenience: `uv run xiao-cli deploy`.)*
+:: 3b. (Optional) Build, flash, and verify minimal USB serial smoke-test binary
+uv run xiao-cli deploy --smoke-test
 
-### 3. Restoring CircuitPython from Rust (`python-restore`)
-When running bare-metal Rust, the `CIRCUITPY` USB drive is replaced by native Rust execution. To switch back to CircuitPython and restore the `CIRCUITPY` (`D:\`) filesystem in one step:
-```bash
-# Restore CircuitPython runtime and automatically deploy latest code.py
-uv run xiao-cli python-restore
+:: 4. Run 7-point HIL verification against currently running Rust firmware
+uv run xiao-cli test
 
-# Restore, deploy, and immediately run automated hardware verification
-uv run xiao-cli python-restore --test
-```
-*What this automated command does:*
-1. Automatically triggers the 1200-baud DFU bootloader (or prompts to double-tap Reset) so `XIAO-SENSE` mounts on `D:\`.
-2. Flashes the official CircuitPython runtime UF2 (cached locally in `build/`).
-3. Waits for CircuitPython to format/mount the onboard SPI flash filesystem as `CIRCUITPY` (`D:\`).
-4. Copies `src/xiao_nrf52840_sense/circuitpython/code.py` to `CIRCUITPY/code.py`.
-
-### 4. Automated On-Device Verification (`hil-test` / `test`)
-Connects to the board over serial, issues a clean soft-reboot, and validates the 6-point hardware diagnostic test suite in real time:
-```bash
-# Run HIL tests against currently flashed firmware
-uv run xiao-cli hil-test
-
-# Deploy latest code first, then run tests
-uv run xiao-cli hil-test --deploy
-
-# Run verification and keep listening to live clicks & IMU gestures for 15 seconds
-uv run xiao-cli hil-test --listen-sec 15
-```
-**Automated Hardware Checks Performed:**
-1. `POWER_DIAG`: Battery voltage, charge state, CPU temperature, and free RAM/heap.
-2. `MIC_POWER`: `board.MIC_PWR` pin activation and power rail stabilization.
-3. `MIC_DMA_STREAM`: `audiobusio.PDMIn` DMA ring buffer allocation and live sample acquisition.
-4. `IMU_BUS`: LSM6DS3TR-C power rail (`board.IMU_PWR`) and internal I2C communication.
-5. `IMU_ACCEL`: Accelerometer initialization and static 3-axis gravity readings (~1.0g vector magnitude).
-6. `CAL_AND_READY`: Dynamic ambient noise floor calibration and ready state transition.
-
-### 5. Real-Time Telemetry Monitor (`monitor` / `logs`)
-Streams live serial diagnostics at 115200 baud, showing click detections, noise floor shifts, BPM calculations, and IMU gestures:
-```bash
-# Stream continuously (exit with Ctrl+C)
+:: 5. Open interactive live serial console (keys: 1..4, m, d/s, r, z, b)
 uv run xiao-cli monitor
-
-# Soft-reset the board upon connecting and stream live logs
-uv run xiao-cli monitor --reset
-
-# Stream logs for a fixed duration (e.g. 10 seconds)
-uv run xiao-cli monitor --duration 10
 ```
 
-### 6. Board Soft-Reset (`reset`)
-Triggers a programmatic soft-reboot over USB CDC Serial (`Ctrl+C` interrupt followed by `Ctrl+D` software restart) and displays the bootloader output:
-```bash
-uv run xiao-cli reset
-```
-
-### 7. Explicit Port / Drive Overrides
-If multiple boards or drives are attached, override the auto-discovery by specifying `--drive` or `--port`:
-```bash
-uv run xiao-cli --drive E:\ --port COM4 status
-uv run xiao-cli --port COM9 monitor
-```
-
----
-
-## Switching Between CircuitPython and Rust
-
-| Step | To Switch to Embedded Rust | To Switch back to CircuitPython |
-| :--- | :--- | :--- |
-| **One-Command CLI** | `uv run xiao-cli rust-deploy` | `uv run xiao-cli python-restore` |
-| **Target Drive** | `D:\` (`XIAO-SENSE` UF2 Bootloader) | `D:\` (`CIRCUITPY` FAT Filesystem) |
-| **Serial Protocol** | `usbd-serial` CDC-ACM (`115200` baud) | CircuitPython REPL CDC (`115200` baud) |
-| **Firmware File** | `build/ai-metronome-rust.uf2` | `build/adafruit-circuitpython-....uf2` + `code.py` |
-
----
-
-## Low-Level Toolchain Commands (`cmd.exe`)
-
-In addition to the unified `xiao-cli` automation, developers can execute standard lower-level toolchain commands directly in Windows Command Prompt (`cmd.exe`):
-
-### 1. Embedded Rust Commands (`cargo`)
-
-```cmd
-:: A. Run host Rust unit tests natively on Windows (x86_64)
-cargo test --manifest-path src\xiao_nrf52840_sense\rust\Cargo.toml --lib --target x86_64-pc-windows-msvc
-
-:: B. Cross-compile bare-metal ARM Cortex-M4F release binary (ELF)
-cargo build --manifest-path src\xiao_nrf52840_sense\rust\Cargo.toml --release --target thumbv7em-none-eabihf
-
-:: C. Convert ELF binary to Nordic nRF52840 UF2 format
-python -c "from tools.xiao_cli import elf_to_uf2; from pathlib import Path; elf_to_uf2(Path('src/xiao_nrf52840_sense/rust/target/thumbv7em-none-eabihf/release/ai-metronome-rust'), Path('build/ai-metronome-rust.uf2'))"
-
-:: D. Trigger 1200-baud DFU bootloader reset over serial (without touching board)
-python -c "import serial; s=serial.Serial('COM9', 1200); s.dtr=False; s.close()"
-
-:: E. Copy UF2 binary to bootloader drive (manual flash)
-copy /Y build\ai-metronome-rust.uf2 D:\ai-metronome-rust.uf2
-```
-
-### 2. CircuitPython Commands (`python` & OS commands)
-
-```cmd
-:: A. Copy code directly to the mounted CIRCUITPY flash drive
-copy /Y src\xiao_nrf52840_sense\circuitpython\code.py D:\code.py
-
-:: B. Connect to raw serial console / REPL stream
-python -m serial.tools.miniterm COM9 115200
-
-:: C. Soft-reboot the board over USB CDC serial (Ctrl-C + Ctrl-D)
-python -c "import serial, time; s=serial.Serial('COM9', 115200); s.write(b''); s.close()"
-
-:: D. Manual CircuitPython runtime restoration (from bare-metal Rust back to CIRCUITPY drive):
-::    1. Double-click the tiny Reset button on the XIAO board -> D:\ mounts as XIAO-SENSE
-::    2. Copy official CircuitPython runtime UF2:
-copy /Y build\adafruit-circuitpython-Seeed_XIAO_nRF52840_Sense-en_US-9.2.4.uf2 D:\
-::    3. Wait 3 seconds -> Board automatically boots CircuitPython and mounts as D:\ (CIRCUITPY)
-::    4. Deploy application code:
-copy /Y src\xiao_nrf52840_sense\circuitpython\code.py D:\code.py
-```
-
-### 3. Interactive Serial Debug Keys (Rust Firmware)
-While connected to `uv run xiao-cli monitor` or miniterm:
-- **`d`**: Dump internal state (noise floor, dynamic threshold, PLL BPM/lock status, IMU g/jerk, battery V, die temp).
-- **`r`**: Re-run the full hardware self-test diagnostic banner (`[DIAG]`, `[MIC]`, `[IMU]`, `[CAL]`, `[READY]`).
-- **`1`**, **`2`**, **`3`**, **`4`**: Switch modes directly (`ON_BEAT`, `IN_BETWEEN`, `4/4`, `3/4`).
-- **`z`**: Trigger immediate 30s inactivity low-power sleep test.
-- **`b`**: Reboot directly into factory `XIAO-SENSE` UF2 bootloader mode.
-
----
-
-## Onboard RGB LED Status Guide
-- **Solid / Blinking Blue**: Initializing hardware, verifying battery & thermal rails, waking `board.MIC_PWR`, verifying `PDMIn` DMA stream, and calibrating ambient noise floor.
-- **3 Green Blinks**: Initialization & sensor verification **OK** — ready and listening.
-- **Bright White Flash + Color Pulses**: Gesture mode switch confirmed (flashes new mode number).
-- **Rhythm Flash (Red, Blue, or Green)**: Real-time beat flash synchronized via the autonomous internal PLL clock according to active mode.
-- **Alternating Red / Blue**: Hardware fault detected during microphone initialization.
+### Interactive Serial Console Keys (`xiao-cli monitor`)
+- **`1`..`4`**: Switch directly to Mode 1 (On-Beat), Mode 2 (Upbeat), Mode 3 (4/4), or Mode 4 (3/4).
+- **`m`**: Cycle to the next mode seamlessly.
+- **`d` / `s`**: Dump internal state (DSP noise floor, PLL lock/BPM, BLE broadcast counter, IMU $g$/jerk, battery voltage, CPU die temp).
+- **`r`**: Replay the full 7-point hardware self-test banner (`[DIAG]`, `[MIC]`, `[IMU]`, `[BLE]`, `[CAL]`, `[READY]`).
+- **`z`**: Trigger immediate low-power sleep mode test (move board to wake).
+- **`b`**: Reboot directly into the `XIAO-SENSE` UF2 bootloader drive (`D:\`).
 
 ---
 
 ## Running Unit Tests
 
-### 1. Python Unit Test Suite (Host Algorithmic, PLL & CLI Tests)
 ```cmd
+:: Run Rust no_std core library unit tests (12 tests: BLE, PLL, DSP, Gesture, CrashLog)
+cargo test --manifest-path src\xiao_nrf52840_sense\rust\Cargo.toml --lib --target x86_64-pc-windows-msvc
+
+:: Run Python UF2 packer & reference algorithm tests (17 tests)
 uv run pytest -v
 ```
 
-### 2. Rust Unit Test Suite (Host `no_std` Core Library Tests)
-```cmd
-cargo test --manifest-path src\xiao_nrf52840_sense\rust\Cargo.toml --lib --target x86_64-pc-windows-msvc
-```
+*(Note: If you ever need to restore the archived CircuitPython prototype onto the board, run `uv run python tools/restore_circuitpython.py`.)*

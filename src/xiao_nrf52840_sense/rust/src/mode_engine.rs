@@ -108,7 +108,7 @@ pub struct MetronomeModeEngine {
     next_upbeat_time_sec: Option<f64>,
     last_fired_beat_time_sec: f64,
     coasted_beats: u8,
-    max_coast_beats: u8,
+    prev_dt_sec: Option<f64>,
 }
 
 impl Default for MetronomeModeEngine {
@@ -132,7 +132,7 @@ impl MetronomeModeEngine {
             next_upbeat_time_sec: None,
             last_fired_beat_time_sec: -10.0,
             coasted_beats: 0,
-            max_coast_beats: 3,
+            prev_dt_sec: None,
         }
     }
 
@@ -147,6 +147,14 @@ impl MetronomeModeEngine {
     pub fn set_mode(&mut self, mode: MetronomeMode) -> MetronomeMode {
         self.mode = mode;
         self.beat_index = 0;
+        if self.mode == MetronomeMode::Mode2InBetween {
+            if let (Some(period), Some(next_beat)) = (self.beat_period_sec, self.next_beat_time_sec)
+            {
+                self.next_upbeat_time_sec = Some(next_beat - (period * 0.5));
+            }
+        } else {
+            self.next_upbeat_time_sec = None;
+        }
         self.mode
     }
 
@@ -160,6 +168,7 @@ impl MetronomeModeEngine {
     pub fn register_click(&mut self, click_time_sec: f64) -> Option<FlashEvent> {
         let prev_click = self.last_click_time_sec;
         let mut ioi: Option<f64> = None;
+        let mut resumed_after_gap = false;
 
         if let Some(prev) = prev_click {
             let delta = click_time_sec - prev;
@@ -169,18 +178,27 @@ impl MetronomeModeEngine {
             if delta <= self.max_ioi_sec {
                 ioi = Some(delta);
             } else {
-                // Gap > 2.0s: new tempo session
-                self.beat_period_sec = None;
-                self.next_beat_time_sec = None;
-                self.next_upbeat_time_sec = None;
-                self.beat_index = 0;
-                self.is_locked = false;
-                self.locked_intervals = 0;
+                // Gap > 2.0s after sound stopped: keep flywheel tempo & lock, resync phase to Beat 1!
+                resumed_after_gap = true;
+                self.prev_dt_sec = None;
             }
         }
 
         self.last_click_time_sec = Some(click_time_sec);
         self.coasted_beats = 0;
+
+        if resumed_after_gap {
+            self.beat_index = 0;
+            if let Some(period) = self.beat_period_sec {
+                self.next_beat_time_sec = Some(click_time_sec + period);
+                if self.mode == MetronomeMode::Mode2InBetween {
+                    self.next_upbeat_time_sec = Some(click_time_sec + (period * 0.5));
+                } else {
+                    self.next_upbeat_time_sec = None;
+                }
+            }
+            return self.fire_beat(click_time_sec);
+        }
 
         if let Some(interval) = ioi {
             match self.beat_period_sec {
@@ -188,6 +206,7 @@ impl MetronomeModeEngine {
                     self.beat_period_sec = Some(interval);
                     self.locked_intervals = 1;
                     self.is_locked = false;
+                    self.prev_dt_sec = Some(interval);
                 }
                 Some(curr_period) => {
                     if (curr_period * 0.72..=curr_period * 1.38).contains(&interval) {
@@ -196,20 +215,28 @@ impl MetronomeModeEngine {
                         if self.locked_intervals >= 2 {
                             self.is_locked = true;
                         }
-                    } else if (curr_period * 1.75..=curr_period * 2.25).contains(&interval) {
-                        // Missed single click recovery
-                        self.beat_period_sec = Some(0.75 * curr_period + 0.25 * (interval * 0.5));
-                        self.locked_intervals = self.locked_intervals.saturating_add(1);
-                        if self.locked_intervals >= 2 {
+                    } else if let Some(prev_dt) = self.prev_dt_sec {
+                        if (interval - prev_dt).abs() / prev_dt < 0.25 {
+                            // Two consecutive consistent intervals at a new slower or faster tempo!
+                            let new_period = 0.5 * (interval + prev_dt);
+                            self.beat_period_sec = Some(new_period);
+                            self.locked_intervals = 2;
                             self.is_locked = true;
+                        } else {
+                            // First interval of a potential tempo change -> adopt immediately so slowing down tracks
+                            self.beat_period_sec = Some(interval);
+                            self.beat_index = 0;
+                            self.locked_intervals = 1;
+                            self.is_locked = false;
                         }
                     } else {
-                        // Tempo change -> re-lock
+                        // Tempo change -> adopt new interval
                         self.beat_period_sec = Some(interval);
                         self.beat_index = 0;
                         self.locked_intervals = 1;
                         self.is_locked = false;
                     }
+                    self.prev_dt_sec = Some(interval);
                 }
             }
         }
@@ -252,7 +279,7 @@ impl MetronomeModeEngine {
         immediate_event
     }
 
-    /// Advance the autonomous PLL clock to `now_sec`.
+    /// Advance the autonomous PLL clock to `now_sec` (continuous flywheel coasting).
     pub fn poll(&mut self, now_sec: f64) -> Option<FlashEvent> {
         let period = self.beat_period_sec?;
 
@@ -260,38 +287,33 @@ impl MetronomeModeEngine {
         if self.mode == MetronomeMode::Mode2InBetween {
             if let Some(upbeat_t) = self.next_upbeat_time_sec {
                 if now_sec >= upbeat_t {
-                    let event_time = upbeat_t;
                     self.next_upbeat_time_sec = None;
-                    let brightness = if self.is_locked {
-                        LOCKED_BRIGHTNESS
-                    } else {
-                        PRE_LOCK_BRIGHTNESS
-                    };
-                    return Some(FlashEvent {
-                        color: LedColor::Blue,
-                        mode: self.mode,
-                        beat_in_bar: 1,
-                        bpm: self.bpm(),
-                        scheduled_time_sec: event_time,
-                        is_upbeat: true,
-                        brightness,
-                        is_locked: self.is_locked,
-                    });
+                    // Guard against firing a stale upbeat if the user switched into Mode 2
+                    // during the second half of a beat interval (`now_sec - upbeat_t > 0.25 * period`)
+                    if (now_sec - upbeat_t) <= (period * 0.25) {
+                        let brightness = if self.is_locked {
+                            LOCKED_BRIGHTNESS
+                        } else {
+                            PRE_LOCK_BRIGHTNESS
+                        };
+                        return Some(FlashEvent {
+                            color: LedColor::Blue,
+                            mode: self.mode,
+                            beat_in_bar: 1,
+                            bpm: self.bpm(),
+                            scheduled_time_sec: upbeat_t,
+                            is_upbeat: true,
+                            brightness,
+                            is_locked: self.is_locked,
+                        });
+                    }
                 }
             }
         }
 
-        // 2. Autonomous beat clock check
+        // 2. Autonomous beat clock check (freewheels indefinitely until next sound resyncs)
         let next_beat = self.next_beat_time_sec?;
         if now_sec >= next_beat {
-            if self.coasted_beats >= self.max_coast_beats {
-                self.next_beat_time_sec = None;
-                self.next_upbeat_time_sec = None;
-                self.is_locked = false;
-                self.locked_intervals = 0;
-                return None;
-            }
-
             let event_time = next_beat;
             self.coasted_beats = self.coasted_beats.saturating_add(1);
             self.next_beat_time_sec = Some(event_time + period);
@@ -427,5 +449,46 @@ mod tests {
         assert_eq!(ev5.beat_in_bar, 1);
         assert_eq!(ev5.color, LedColor::Green);
         assert!((ev5.brightness - LOCKED_BRIGHTNESS).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_continuous_flywheel_coasting_and_mode_switch_preserves_tempo() {
+        let mut eng = MetronomeModeEngine::new();
+        let _ = eng.register_click(1.0);
+        let _ = eng.register_click(1.5);
+        let _ = eng.register_click(2.0);
+        assert!(eng.is_locked);
+        assert!((eng.bpm() - 120.0).abs() < 1.0);
+
+        // Coast for 8 beats (4.0 seconds) without any clicks -> stays locked and keeps firing!
+        for i in 1..=8 {
+            let t = 2.0 + (i as f64) * 0.5 + 0.001;
+            let ev = eng.poll(t).expect("Flywheel should continue coasting indefinitely");
+            assert!(ev.is_locked);
+            assert!((ev.bpm - 120.0).abs() < 1.0);
+        }
+
+        // Switch mode to Mode 3 (4/4) while coasting -> preserves tempo & lock!
+        eng.set_mode(MetronomeMode::Mode3FourFour);
+        assert!(eng.is_locked);
+        let ev_m3 = eng.poll(6.501).expect("Mode 3 should immediately coast at same speed");
+        assert_eq!(ev_m3.color, LedColor::Green);
+        assert_eq!(ev_m3.beat_in_bar, 1);
+    }
+
+    #[test]
+    fn test_tempo_deceleration_adapts_immediately() {
+        let mut eng = MetronomeModeEngine::new();
+        // Lock at 150 BPM (0.40s period)
+        let _ = eng.register_click(1.0);
+        let _ = eng.register_click(1.4);
+        let _ = eng.register_click(1.8);
+        assert!((eng.bpm() - 150.0).abs() < 1.0);
+
+        // Suddenly slow down to 75 BPM (0.80s interval = 2x slower)
+        let _ = eng.register_click(2.6);
+        let ev_slow = eng.register_click(3.4).unwrap();
+        assert!(ev_slow.is_locked);
+        assert!((eng.bpm() - 75.0).abs() < 2.0);
     }
 }
