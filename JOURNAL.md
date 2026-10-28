@@ -33,8 +33,8 @@ Chronological record of milestones, architectural decisions, user steering, and 
      - Added `elf_to_ihex()` and `build_dfu_package()` (`adafruit-nrfutil dfu genpkg --dev-type 0x0052 --sd-req 0x0123`) so `xiao-cli build` outputs both `.uf2` and official `.zip` DFU packages (`--dfu`).
      - Replaced `shutil.copyfile` with `copy_uf2_blocks_flushed()` (unbuffered 512-byte UF2 block writes + `os.fsync()`).
      - Added `delay_ms_with_poll()` in `hardware.rs` so USB CDC stays continuously polled during `MIC_PWR` (`30 ms`) and `IMU_PWR` (`80 ms`) startup delays.
-  5. **CJMCU-2812-8 (8x WS2812B NeoPixel Stick on `D0` / `P0.02`) Driver in Rust (`hardware.rs`, `main.rs`)**:
-     - Ported the 8-pixel WS2812B driver (`800 kHz` cycle-accurate bit-banging at `64 MHz` on `P0.02` with `H0H1` high drive) into `RgbLedController`.
+  5. **CJMCU-2812-8 (8x WS2812B NeoPixel Stick on `D0` / `P0.02`) Hardware `NRF_PWM0` EasyDMA Driver (`hardware.rs`, `main.rs`)**:
+     - Replaced software bit-banging (which stretched `'0'` pulses past `550 ns` and latched `0xFFFFFF` full white) with hardware `NRF_PWM0` EasyDMA (`prescaler = DIV_1` 16 MHz, `countertop = 20` = 800 kHz, `DUTY_0 = 6 | 0x8000` = `375 ns`, `DUTY_1 = 13 | 0x8000` = `812.5 ns`) in `RgbLedController`.
      - Added the startup cyan/amber sweep (`run_startup_pattern`), 3x Green ready blink across all 8 pixels, and the full 4-mode peripheral choreography (`render_beat_neopixels` / `start_beat_flash`).
   6. **On-Device Verification (`COM10`)**:
      - Ran `uv run xiao-cli deploy --test`: automatically triggered bootloader from `COM10`, flashed `ai-metronome-rust.uf2` (`124,928 bytes`) to `D:\`, re-enumerated `COM10` in ~1s, verified the 8-LED NeoPixel bar sweep and 4-mode flashing, and **passed all 7/7 HIL checkpoints** (`POWER_DIAG`, `MIC_POWER`, `MIC_DMA_STREAM`, `IMU_BUS`, `IMU_ACCEL`, `BLE_ADVERTISER` `MAC=EB:E5:CF:40:4D:4A`, `CAL_AND_READY`) in `1.14s`.

@@ -63,7 +63,7 @@ When building bare-metal Embedded Rust (`thumbv7em-none-eabihf`, `nrf52840-hal` 
 ### B. False Assumptions Removed (Do NOT Do)
 - **FALSE**: *"Touching `USBD.USBPULLUP` or `USBD.ENABLE` manually before `Usbd::new()` fixes post-UF2 enumeration."* — Touching `USBD` registers before `nrf-usbd` initializes actually interferes with `nrf-usbd`'s internal power/event state machine; a clean `SCB::sys_reset()` trampoline is what resets `NRF_USBD` hardware properly.
 - **FALSE**: *"Enabling global interrupts (`cortex_m::interrupt::enable()`) helps `nrf-usbd` enumerate."* — Polling `usb_dev.poll()` works purely via registers with `PRIMASK=1`; enabling global interrupts without a `USBD` ISR vectors into `DefaultHandler`.
-- **FALSE**: *"Linking bare-metal Rust at `0x00001000` works on factory XIAO nRF52840 Sense."* — Overwriting `0x1000` erases SoftDevice S140 v7.3.0 and causes the factory bootloader (`0.6.2`) to reject the image and loop in DFU mode.
+- **FALSE**: *"Software `cortex_m::asm::delay()` bit-banging at 64 MHz drives WS2812B NeoPixels accurately."* — Loop/store overhead stretches `'0'` pulses past `550 ns`, causing WS2812B LEDs to latch `0xFFFFFF` (stuck full white). Always use hardware `NRF_PWM0` EasyDMA (`prescaler = DIV_1` 16 MHz, `countertop = 20` = 800 kHz, `DUTY_0 = 6 | 0x8000` = `375 ns`, `DUTY_1 = 13 | 0x8000` = `812.5 ns`).
 
 ---
 

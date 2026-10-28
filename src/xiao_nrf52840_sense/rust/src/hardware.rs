@@ -162,36 +162,81 @@ impl RgbLedController {
         self.active_color = LedColor::Off;
     }
 
-    /// Transmit 24 bytes (8 pixels x 3 GRB bytes) over `P0.02` (`D0`) using 800 kHz WS2812B bit-banging @ 64 MHz.
-    #[inline(never)]
-    pub fn flush_neopixels(&self, p0: &p0::RegisterBlock) {
-        let mask: u32 = 1 << Self::PIN_NEOPIXEL_D0;
-        let outset_ptr = p0.outset.as_ptr();
-        let outclr_ptr = p0.outclr.as_ptr();
+    /// Transmit 24 bytes (8 pixels x 3 GRB bytes) over `P0.02` (`D0`) using hardware `NRF_PWM0` EasyDMA @ 800 kHz.
+    ///
+    /// Why `NRF_PWM0` instead of software bit-banging:
+    /// - At 64 MHz, software `asm::delay()` loops add branch/store overhead that stretches a `'0'` pulse
+    ///   past 550 ns, causing WS2812B LEDs to latch every bit as `'1'` (`0xFFFFFF` = full blinding white!).
+    /// - Hardware `NRF_PWM0` with `prescaler = DIV_1` (16 MHz) and `countertop = 20` (1.25 us = 800 kHz)
+    ///   produces crystal-exact `375 ns` (`6 | 0x8000`) `'0'` pulses and `812.5 ns` (`13 | 0x8000`) `'1'` pulses!
+    pub fn flush_neopixels(&self, _p0: &p0::RegisterBlock) {
+        const PWM_COUNTERTOP: u16 = 20; // 16 MHz / 20 = 800 kHz (1.25 us per bit)
+        const DUTY_0: u16 = 6 | 0x8000; // 6 / 16 MHz = 375 ns HIGH, 875 ns LOW
+        const DUTY_1: u16 = 13 | 0x8000; // 13 / 16 MHz = 812.5 ns HIGH, 437.5 ns LOW
+        const DUTY_RESET: u16 = 0x8000; // 0 ticks HIGH = 100% LOW for latch reset
 
+        // 24 bytes * 8 bits = 192 bit periods + 48 reset periods (60 us LOW) = 240 halfwords in RAM
+        let mut pwm_seq = [DUTY_RESET; 240];
+        let mut idx = 0usize;
         for &byte in &self.np_buf {
-            let mut b = byte;
-            for _ in 0..8 {
-                unsafe {
-                    if (b & 0x80) != 0 {
-                        // WS2812B '1' bit: ~750 ns HIGH, ~500 ns LOW
-                        core::ptr::write_volatile(outset_ptr, mask);
-                        cortex_m::asm::delay(34);
-                        core::ptr::write_volatile(outclr_ptr, mask);
-                        cortex_m::asm::delay(18);
-                    } else {
-                        // WS2812B '0' bit: ~350 ns HIGH, ~850 ns LOW
-                        core::ptr::write_volatile(outset_ptr, mask);
-                        cortex_m::asm::delay(12);
-                        core::ptr::write_volatile(outclr_ptr, mask);
-                        cortex_m::asm::delay(36);
-                    }
-                }
-                b <<= 1;
+            for shift in (0..8).rev() {
+                pwm_seq[idx] = if ((byte >> shift) & 1) != 0 {
+                    DUTY_1
+                } else {
+                    DUTY_0
+                };
+                idx += 1;
             }
         }
-        // Latch reset pulse (> 60 us LOW)
-        cortex_m::asm::delay(4_500);
+
+        unsafe {
+            let pwm0 = &*nrf52840_hal::pac::PWM0::ptr();
+            pwm0.enable.write(|w| w.enable().disabled());
+            pwm0.psel.out[0].write(|w| {
+                w.pin()
+                    .bits(Self::PIN_NEOPIXEL_D0 as u8)
+                    .port()
+                    .bit(false)
+                    .connect()
+                    .connected()
+            });
+            pwm0.mode.write(|w| w.updown().up());
+            pwm0.prescaler.write(|w| w.prescaler().div_1());
+            pwm0.countertop
+                .write(|w| w.countertop().bits(PWM_COUNTERTOP));
+            pwm0.loop_.write(|w| w.cnt().disabled());
+            pwm0.decoder
+                .write(|w| w.load().common().mode().refresh_count());
+
+            pwm0.seq0
+                .ptr
+                .write(|w| w.bits(pwm_seq.as_ptr() as u32));
+            pwm0.seq0
+                .cnt
+                .write(|w| w.cnt().bits(pwm_seq.len() as u16));
+            pwm0.seq0.refresh.write(|w| w.bits(0));
+            pwm0.seq0.enddelay.write(|w| w.bits(0));
+
+            pwm0.events_seqend[0].write(|w| w.bits(0));
+            pwm0.events_stopped.write(|w| w.bits(0));
+            pwm0.enable.write(|w| w.enable().enabled());
+
+            cortex_m::asm::dsb();
+            pwm0.tasks_seqstart[0].write(|w| w.bits(1));
+
+            let mut guard: u32 = 100_000;
+            while pwm0.events_seqend[0].read().bits() == 0 && guard > 0 {
+                guard -= 1;
+            }
+
+            pwm0.tasks_stop.write(|w| w.bits(1));
+            let mut stop_guard: u32 = 20_000;
+            while pwm0.events_stopped.read().bits() == 0 && stop_guard > 0 {
+                stop_guard -= 1;
+            }
+            pwm0.enable.write(|w| w.enable().disabled());
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     /// Write an 8-pixel `(R, G, B)` frame scaled by `scale` (`0.0..1.0` * `NEOPIXEL_BASE_BRIGHTNESS`).
