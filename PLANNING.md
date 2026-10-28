@@ -34,8 +34,8 @@ Active backlog and task tracking for `ai-metronome` (Embedded Rust Firmware on S
 
 ## Active Sprint: Live BLE Sensor Logger Tracking & Piano Acoustic Isolation
 
+- [x] Port CJMCU-2812-8 (8x WS2812B NeoPixel stick on `D0` / `P0.02`) driver to Rust (`RgbLedController` 800 kHz WS2812B driver with startup sweep, 3x green ready blink, and all 4 mode choreographies)
 - [ ] Verify live `AI-METRO` BTHome v2 (`0xFCD2`) tempo tracking in Android **Sensor Logger**
-- [ ] Port CJMCU-2812-8 (8x WS2812B NeoPixel stick on `D0` / `P0.02`) driver to Rust (`NRF_PWM0` EasyDMA) if external LED bar is used alongside onboard RGB LED
 
 ---
 

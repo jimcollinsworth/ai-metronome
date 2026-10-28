@@ -245,9 +245,12 @@ fn run_and_print_self_test<'a>(
 ) {
     let mut line = LineBuf::<192>::new();
 
-    // Blue LED ON during initialization / self-test
+    // Blue LED ON during initialization / self-test + CJMCU-2812-8 NeoPixel stick sweep on D0
     led.set_color(p0, LedColor::Blue);
     feed_watchdog(wdt);
+    led.run_startup_pattern(p0, timer, timer0, || {
+        let _ = usb_dev.poll(&mut [serial]);
+    });
 
     // Header
     line.clear();
@@ -450,11 +453,13 @@ fn run_and_print_self_test<'a>(
     );
     usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
 
-    // 5. Signal Ready (3 Green LED Blinks while polling USB + [READY] Banner)
+    // 5. Signal Ready (3 Green LED Blinks across onboard LED + all 8 NeoPixels while polling USB + [READY] Banner)
     feed_watchdog(wdt);
     led.off(p0);
+    let green_np = [(0u8, 255u8, 40u8); 8];
     for _ in 0..3 {
         led.set_color(p0, LedColor::Green);
+        led.write_neopixel_frame(p0, &green_np, 1.0);
         let t0 = timer.now_us(timer0);
         while timer.now_us(timer0).wrapping_sub(t0) < 90_000 {
             let _ = usb_dev.poll(&mut [serial]);
@@ -465,6 +470,13 @@ fn run_and_print_self_test<'a>(
             let _ = usb_dev.poll(&mut [serial]);
         }
     }
+
+    line.clear();
+    let _ = writeln!(
+        line,
+        "  [LED]  NeoPixel Stick   : Active on D0/P0.02 (CJMCU-2812-8, 8 pixels @ 22% glow)"
+    );
+    usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
 
     line.clear();
     let _ = writeln!(
@@ -678,7 +690,15 @@ fn main() -> ! {
         let click_ev = click_detector.process_frame(&audio_buf, now_sec);
         if click_ev.is_click {
             if let Some(flash) = mode_engine.register_click(click_ev.onset_time_sec) {
-                led.start_flash(&dp.P0, flash.color, flash.brightness, now_sec);
+                led.start_beat_flash(
+                    &dp.P0,
+                    mode_engine.mode,
+                    flash.beat_in_bar,
+                    flash.is_upbeat,
+                    flash.color,
+                    flash.brightness,
+                    now_sec,
+                );
                 ble.broadcast_tempo(&dp.RADIO, flash.bpm);
                 last_ble_adv_sec = now_sec;
                 line.clear();
@@ -696,6 +716,17 @@ fn main() -> ! {
                 );
                 usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
             } else {
+                // Mode 2 (Mode2InBetween) downbeat click: show purple center anchor [3, 4] on NeoPixel stick!
+                if mode_engine.mode == MetronomeMode::Mode2InBetween {
+                    let anchor_frame = RgbLedController::render_beat_neopixels(
+                        MetronomeMode::Mode2InBetween,
+                        (mode_engine.beat_index as u8) | 1,
+                        false,
+                    );
+                    led.write_neopixel_frame(&dp.P0, &anchor_frame, 1.0);
+                    led.active_color = LedColor::Blue;
+                    led.off_deadline_sec = now_sec + 0.080;
+                }
                 ble.broadcast_tempo(&dp.RADIO, mode_engine.bpm());
                 last_ble_adv_sec = now_sec;
                 line.clear();
@@ -719,7 +750,15 @@ fn main() -> ! {
         // C. Poll autonomous PLL beat / upbeat scheduler
         let now_pll_sec = timer.now_sec(&dp.TIMER0);
         if let Some(sched_flash) = mode_engine.poll(now_pll_sec) {
-            led.start_flash(&dp.P0, sched_flash.color, sched_flash.brightness, now_pll_sec);
+            led.start_beat_flash(
+                &dp.P0,
+                mode_engine.mode,
+                sched_flash.beat_in_bar,
+                sched_flash.is_upbeat,
+                sched_flash.color,
+                sched_flash.brightness,
+                now_pll_sec,
+            );
             ble.broadcast_tempo(&dp.RADIO, sched_flash.bpm);
             last_ble_adv_sec = now_pll_sec;
             let tag = if sched_flash.is_upbeat {

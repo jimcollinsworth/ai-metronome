@@ -15,7 +15,9 @@ use nrf52840_hal::pac::{
 use ai_metronome_rust::ble_advertiser::{
     build_tempo_adv_pdu, format_random_static_mac, BLE_ADV_CHANNELS, MAX_BLE_PDU_LEN,
 };
-use ai_metronome_rust::mode_engine::{LedColor, PRE_LOCK_BRIGHTNESS, WEAK_BEAT_RED_BRIGHTNESS};
+use ai_metronome_rust::mode_engine::{
+    LedColor, MetronomeMode, PRE_LOCK_BRIGHTNESS, WEAK_BEAT_RED_BRIGHTNESS,
+};
 
 /// Adafruit UF2 Bootloader magic value in `NRF_POWER->GPREGRET` to enter UF2 DFU mode.
 pub const DFU_MAGIC_UF2_RESET: u8 = 0x57;
@@ -101,21 +103,27 @@ impl MonotonicTimer {
     }
 }
 
-/// Active-Low RGB LED controller (`P0.26` Red, `P0.30` Green, `P0.06` Blue).
+/// Active-Low RGB LED controller (`P0.26` Red, `P0.30` Green, `P0.06` Blue)
+/// + CJMCU-2812-8 (8x WS2812B NeoPixel Stick on `D0` / `P0.02`) driver.
 pub struct RgbLedController {
     pub off_deadline_sec: f64,
     pub active_color: LedColor,
+    pub np_buf: [u8; 24],
 }
 
 impl RgbLedController {
     pub const PIN_RED: usize = 26;
     pub const PIN_GREEN: usize = 30;
     pub const PIN_BLUE: usize = 6;
+    pub const PIN_NEOPIXEL_D0: usize = 2; // D0 = P0.02
+    pub const NEOPIXEL_COUNT: usize = 8;
+    pub const NEOPIXEL_BASE_BRIGHTNESS: f32 = 0.22;
 
     pub const fn new() -> Self {
         Self {
             off_deadline_sec: 0.0,
             active_color: LedColor::Off,
+            np_buf: [0u8; 24],
         }
     }
 
@@ -136,7 +144,179 @@ impl RgbLedController {
                     .s0s1()
             });
         }
+
+        // Configure D0 (P0.02) as High-Drive (H0H1) push-pull output for CJMCU-2812-8 NeoPixel stick, initially LOW
+        p0.outclr
+            .write(|w| unsafe { w.bits(1 << Self::PIN_NEOPIXEL_D0) });
+        p0.pin_cnf[Self::PIN_NEOPIXEL_D0].write(|w| {
+            w.dir()
+                .output()
+                .input()
+                .disconnect()
+                .pull()
+                .disabled()
+                .drive()
+                .h0h1()
+        });
+        self.clear_neopixels(p0);
         self.active_color = LedColor::Off;
+    }
+
+    /// Transmit 24 bytes (8 pixels x 3 GRB bytes) over `P0.02` (`D0`) using 800 kHz WS2812B bit-banging @ 64 MHz.
+    #[inline(never)]
+    pub fn flush_neopixels(&self, p0: &p0::RegisterBlock) {
+        let mask: u32 = 1 << Self::PIN_NEOPIXEL_D0;
+        let outset_ptr = p0.outset.as_ptr();
+        let outclr_ptr = p0.outclr.as_ptr();
+
+        for &byte in &self.np_buf {
+            let mut b = byte;
+            for _ in 0..8 {
+                unsafe {
+                    if (b & 0x80) != 0 {
+                        // WS2812B '1' bit: ~750 ns HIGH, ~500 ns LOW
+                        core::ptr::write_volatile(outset_ptr, mask);
+                        cortex_m::asm::delay(34);
+                        core::ptr::write_volatile(outclr_ptr, mask);
+                        cortex_m::asm::delay(18);
+                    } else {
+                        // WS2812B '0' bit: ~350 ns HIGH, ~850 ns LOW
+                        core::ptr::write_volatile(outset_ptr, mask);
+                        cortex_m::asm::delay(12);
+                        core::ptr::write_volatile(outclr_ptr, mask);
+                        cortex_m::asm::delay(36);
+                    }
+                }
+                b <<= 1;
+            }
+        }
+        // Latch reset pulse (> 60 us LOW)
+        cortex_m::asm::delay(4_500);
+    }
+
+    /// Write an 8-pixel `(R, G, B)` frame scaled by `scale` (`0.0..1.0` * `NEOPIXEL_BASE_BRIGHTNESS`).
+    pub fn write_neopixel_frame(
+        &mut self,
+        p0: &p0::RegisterBlock,
+        frame: &[(u8, u8, u8); 8],
+        scale: f32,
+    ) {
+        let eff = (Self::NEOPIXEL_BASE_BRIGHTNESS * scale).clamp(0.0, 1.0);
+        for i in 0..Self::NEOPIXEL_COUNT {
+            let (r, g, b) = frame[i];
+            let idx = i * 3;
+            // WS2812B uses GRB byte order
+            self.np_buf[idx] = ((g as f32) * eff) as u8;
+            self.np_buf[idx + 1] = ((r as f32) * eff) as u8;
+            self.np_buf[idx + 2] = ((b as f32) * eff) as u8;
+        }
+        self.flush_neopixels(p0);
+    }
+
+    pub fn clear_neopixels(&mut self, p0: &p0::RegisterBlock) {
+        self.np_buf = [0u8; 24];
+        self.flush_neopixels(p0);
+    }
+
+    /// Render the 8-pixel CJMCU-2812-8 choreography matching CircuitPython v2.6:
+    /// - Mode 1 (On-Beat): Pendulum rock alternating left `[1,2,3]` and right `[4,5,6]` in warm amber-red `(255, 40, 0)`
+    /// - Mode 2 (Upbeat): Center anchor `[3,4]` in vibrant purple `(180, 0, 220)` on click; outer wings `[0,1,6,7]` in cyan-blue `(0, 120, 255)` on upbeat
+    /// - Mode 3 (4/4 Meter): 2-LED progressive measure bar (`[0,1]` Green, `[2,3]` Amber, `[4,5]` Teal, `[6,7]` Amber)
+    /// - Mode 4 (3/4 Meter): 3-2-3 waltz triple step (`[0,1,2]` Green, `[3,4]` Amber, `[5,6,7]` Amber)
+    pub fn render_beat_neopixels(
+        mode: MetronomeMode,
+        beat_in_bar: u8,
+        is_upbeat: bool,
+    ) -> [(u8, u8, u8); 8] {
+        let mut frame = [(0u8, 0u8, 0u8); 8];
+
+        if is_upbeat {
+            let c = (0, 120, 255);
+            frame[0] = c;
+            frame[1] = c;
+            frame[6] = c;
+            frame[7] = c;
+            return frame;
+        }
+
+        match mode {
+            MetronomeMode::Mode1OnBeat => {
+                let c = (255, 40, 0);
+                if beat_in_bar % 2 == 1 {
+                    frame[1] = c;
+                    frame[2] = c;
+                    frame[3] = c;
+                } else {
+                    frame[4] = c;
+                    frame[5] = c;
+                    frame[6] = c;
+                }
+            }
+            MetronomeMode::Mode2InBetween => {
+                let c = (180, 0, 220);
+                frame[3] = c;
+                frame[4] = c;
+            }
+            MetronomeMode::Mode3FourFour => match beat_in_bar {
+                1 => {
+                    frame[0] = (0, 255, 40);
+                    frame[1] = (0, 255, 40);
+                }
+                2 => {
+                    frame[2] = (200, 150, 40);
+                    frame[3] = (200, 150, 40);
+                }
+                3 => {
+                    frame[4] = (0, 220, 180);
+                    frame[5] = (0, 220, 180);
+                }
+                _ => {
+                    frame[6] = (200, 150, 40);
+                    frame[7] = (200, 150, 40);
+                }
+            },
+            MetronomeMode::Mode4ThreeFour => match beat_in_bar {
+                1 => {
+                    frame[0] = (0, 255, 40);
+                    frame[1] = (0, 255, 40);
+                    frame[2] = (0, 255, 40);
+                }
+                2 => {
+                    frame[3] = (200, 150, 40);
+                    frame[4] = (200, 150, 40);
+                }
+                _ => {
+                    frame[5] = (200, 150, 40);
+                    frame[6] = (200, 150, 40);
+                    frame[7] = (200, 150, 40);
+                }
+            },
+        }
+        frame
+    }
+
+    /// Startup hardware self-test sweep across all 8 pixels on `D0` (`P0.02`) + warm amber burst.
+    pub fn run_startup_pattern<F: FnMut()>(
+        &mut self,
+        p0: &p0::RegisterBlock,
+        timer: &mut MonotonicTimer,
+        timer0: &TIMER0,
+        mut poll_fn: F,
+    ) {
+        for i in 0..Self::NEOPIXEL_COUNT {
+            let mut frame = [(0u8, 0u8, 0u8); 8];
+            frame[i] = (0, 180, 255);
+            if i > 0 {
+                frame[i - 1] = (0, 40, 80);
+            }
+            self.write_neopixel_frame(p0, &frame, 1.0);
+            timer.delay_ms_with_poll(timer0, 35, &mut poll_fn);
+        }
+        let amber = [(220u8, 140u8, 20u8); 8];
+        self.write_neopixel_frame(p0, &amber, 1.0);
+        timer.delay_ms_with_poll(timer0, 120, &mut poll_fn);
+        self.clear_neopixels(p0);
+        timer.delay_ms_with_poll(timer0, 40, &mut poll_fn);
     }
 
     #[inline]
@@ -182,6 +362,7 @@ impl RgbLedController {
     pub fn off(&mut self, p0: &p0::RegisterBlock) {
         self.off_deadline_sec = 0.0;
         self.set_color(p0, LedColor::Off);
+        self.clear_neopixels(p0);
     }
 
     /// Start a non-blocking LED flash with retinal pulse-width dimming matching v2.6:
@@ -207,6 +388,48 @@ impl RgbLedController {
             0.130
         };
         self.set_color(p0, color);
+        let rgb = match color {
+            LedColor::Red => (255u8, 40u8, 0u8),
+            LedColor::Green => (0u8, 255u8, 40u8),
+            LedColor::Blue => (0u8, 120u8, 255u8),
+            LedColor::White => (140u8, 140u8, 140u8),
+            LedColor::Off => (0u8, 0u8, 0u8),
+        };
+        let frame = [rgb; 8];
+        self.write_neopixel_frame(p0, &frame, brightness.clamp(0.25, 1.0));
+        self.off_deadline_sec = now_sec + pulse_sec;
+    }
+
+    /// Start a beat-synchronized flash across both the onboard RGB LED and the 8-pixel CJMCU-2812-8 stick.
+    pub fn start_beat_flash(
+        &mut self,
+        p0: &p0::RegisterBlock,
+        mode: MetronomeMode,
+        beat_in_bar: u8,
+        is_upbeat: bool,
+        color: LedColor,
+        brightness: f32,
+        now_sec: f64,
+    ) {
+        if color == LedColor::Off || brightness <= 0.0 {
+            self.off(p0);
+            return;
+        }
+        let pulse_sec = if brightness <= PRE_LOCK_BRIGHTNESS + 0.01 {
+            0.012
+        } else if brightness <= WEAK_BEAT_RED_BRIGHTNESS + 0.05 {
+            0.015
+        } else {
+            0.130
+        };
+        self.set_color(p0, color);
+        let frame = Self::render_beat_neopixels(mode, beat_in_bar, is_upbeat);
+        let np_scale = if brightness <= PRE_LOCK_BRIGHTNESS + 0.01 {
+            0.45
+        } else {
+            1.0
+        };
+        self.write_neopixel_frame(p0, &frame, np_scale);
         self.off_deadline_sec = now_sec + pulse_sec;
     }
 
@@ -281,8 +504,10 @@ impl RgbLedController {
     /// 2 crisp Green blinks upon waking from sleep (`signal_wake`).
     pub fn signal_wake(&mut self, p0: &p0::RegisterBlock, timer: &mut MonotonicTimer, timer0: &TIMER0) {
         self.off(p0);
+        let green_frame = [(0u8, 255u8, 40u8); 8];
         for _ in 0..2 {
             self.set_color(p0, LedColor::Green);
+            self.write_neopixel_frame(p0, &green_frame, 1.0);
             timer.delay_ms(timer0, 75);
             self.off(p0);
             timer.delay_ms(timer0, 75);
