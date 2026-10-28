@@ -12,12 +12,12 @@
 - **Continuous Flywheel Coasting**: Once locked (3 steady clicks / 2 consistent intervals), the internal PLL clock continues flashing at the exact tempo indefinitely even after sound stops, and immediately resynchronizes phase and downbeat when sound returns.
 - **Dynamic Acceleration & Deceleration**: Tracks two-click interval transitions (`prev_dt_sec`) so slowing down or speeding up adapts immediately without harmonic trapping.
 
-### 2. 4 Visual Rhythm Modes & Seamless Mode Switching
-Switching modes (via physical IMU gestures or USB serial commands) preserves the locked flywheel tempo and phase without pausing the beat clock:
-- **Mode 1 — On-Beat (`RED`)**: Flashes Red on every beat ($1\times$); always the default mode on reset.
-- **Mode 2 — Upbeat / In-Between (`BLUE`)**: Flashes Blue halfway between beats ($t + 0.5 \times \text{period}$).
-- **Mode 3 — 4/4 Meter (`GREEN` = 1, `RED` = 2, 3, 4)**: Bright Green downbeat on Beat 1, dimmed Red (`20%`) on Beats 2, 3, and 4.
-- **Mode 4 — 3/4 Meter (`GREEN` = 1, `RED` = 2, 3)**: Bright Green downbeat on Beat 1, dimmed Red (`20%`) on Beats 2 and 3.
+### 2. 4 Visual Rhythm Modes, CJMCU-2812-8 NeoPixel Bar & Seamless Mode Switching
+Switching modes (via physical IMU gestures or USB serial commands) preserves the locked flywheel tempo and phase without pausing the beat clock, driving both the onboard active-low RGB LED and the **CJMCU-2812-8** (8x WS2812B NeoPixel stick on `D0` / `P0.02` at `22%` peripheral glow):
+- **Mode 1 — On-Beat (`RED` + Pendulum Rock)**: Flashes onboard Red and alternates left `[1, 2, 3]` / right `[4, 5, 6]` warm amber-red clusters on the 8-LED bar ($1\times$); always the default mode on reset.
+- **Mode 2 — Upbeat / In-Between (`BLUE` + Center Anchor / Outer Wings)**: Vibrant purple center anchor `[3, 4]` on physical clicks and cyan-blue outer wings `[0, 1, 6, 7]` + onboard Blue halfway between beats ($t + 0.5 \times \text{period}$).
+- **Mode 3 — 4/4 Meter (`GREEN` = 1, `RED` = 2, 3, 4 + 2-LED Measure Step)**: Bright Green downbeat (`[0, 1]`), warm amber Beat 2 (`[2, 3]`), vivid teal Beat 3 (`[4, 5]`), and warm amber Beat 4 (`[6, 7]`).
+- **Mode 4 — 3/4 Meter (`GREEN` = 1, `RED` = 2, 3 + 3-2-3 Waltz Step)**: Bright Green downbeat (`[0, 1, 2]`), warm amber Beat 2 (`[3, 4]`), and warm amber Beat 3 (`[5, 6, 7]`).
 - **Pre-Lock Dimming**: All flashes are dimmed (`18%` / `12 ms` pulse) until the PLL locks onto a steady tempo.
 
 ### 3. Dual-Gesture IMU Mode Switching & 30s Inactivity Sleep

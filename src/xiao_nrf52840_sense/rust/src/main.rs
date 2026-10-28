@@ -690,10 +690,15 @@ fn main() -> ! {
         let click_ev = click_detector.process_frame(&audio_buf, now_sec);
         if click_ev.is_click {
             if let Some(flash) = mode_engine.register_click(click_ev.onset_time_sec) {
+                let np_beat = if mode_engine.mode == MetronomeMode::Mode1OnBeat {
+                    mode_engine.beat_index as u8
+                } else {
+                    flash.beat_in_bar
+                };
                 led.start_beat_flash(
                     &dp.P0,
                     mode_engine.mode,
-                    flash.beat_in_bar,
+                    np_beat,
                     flash.is_upbeat,
                     flash.color,
                     flash.brightness,
@@ -750,10 +755,15 @@ fn main() -> ! {
         // C. Poll autonomous PLL beat / upbeat scheduler
         let now_pll_sec = timer.now_sec(&dp.TIMER0);
         if let Some(sched_flash) = mode_engine.poll(now_pll_sec) {
+            let np_beat = if mode_engine.mode == MetronomeMode::Mode1OnBeat {
+                mode_engine.beat_index as u8
+            } else {
+                sched_flash.beat_in_bar
+            };
             led.start_beat_flash(
                 &dp.P0,
                 mode_engine.mode,
-                sched_flash.beat_in_bar,
+                np_beat,
                 sched_flash.is_upbeat,
                 sched_flash.color,
                 sched_flash.brightness,

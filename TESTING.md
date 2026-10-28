@@ -23,7 +23,7 @@ This document defines the testing strategy, test suites, and Windows `cmd.exe` v
      4. `IMU_BUS` — `P1.08` (`IMU_PWR`) high-drive rail and `NRF_TWIM0` 400 kHz I2C bus (`addr=0x6A`).
      5. `IMU_ACCEL` — `LSM6DS3TR-C` `WHO_AM_I=0x6A` verification, 3-axis accelerometer (`g`), and 3-axis gyroscope (`dps`).
      6. `BLE_ADVERTISER` — `NRF_RADIO` 2.4 GHz BLE 1 Mbps advertiser (`Name="AI-METRO"`, `BTHome v2 UUID=0xFCD2`).
-     7. `CAL_AND_READY` — 25-frame ambient noise floor calibration, 3x Green LED blink, and `[READY]` state.
+     7. `CAL_AND_READY` — 25-frame ambient noise floor calibration, CJMCU-2812-8 (`D0`/`P0.02`) 8-pixel startup sweep + 3x Green LED blink, and `[READY]` state.
 
 ---
 
