@@ -13,12 +13,12 @@
 - **Dynamic Acceleration & Deceleration**: Tracks two-click interval transitions (`prev_dt_sec`) so slowing down or speeding up adapts immediately without harmonic trapping.
 
 ### 2. 4 Visual Rhythm Modes, CJMCU-2812-8 NeoPixel Bar & Seamless Mode Switching
-Switching modes (via physical IMU gestures or USB serial commands) preserves the locked flywheel tempo and phase without pausing the beat clock, driving both the onboard active-low RGB LED and the **CJMCU-2812-8** (8x WS2812B NeoPixel stick on `D0` / `P0.02` at `22%` peripheral glow):
+Switching modes (via physical IMU gestures or USB serial commands) preserves the locked flywheel tempo and phase without pausing the beat clock, driving both the onboard active-low RGB LED and the **CJMCU-2812-8** (8x WS2812B NeoPixel stick on `D0` / `P0.02` at `11%` peripheral glow):
 - **Mode 1 — On-Beat (`RED` + Pendulum Rock)**: Flashes onboard Red and alternates left `[1, 2, 3]` / right `[4, 5, 6]` warm amber-red clusters on the 8-LED bar ($1\times$); always the default mode on reset.
-- **Mode 2 — Upbeat / In-Between (`BLUE` + Center Anchor / Outer Wings)**: Vibrant purple center anchor `[3, 4]` on physical clicks and cyan-blue outer wings `[0, 1, 6, 7]` + onboard Blue halfway between beats ($t + 0.5 \times \text{period}$).
+- **Mode 2 — Upbeat / In-Between (`BLUE` + Dim Center Beat / Bright Off-Beat Accent Wings)**: Dim blue center anchor `[3, 4]` + `12 ms` dim onboard Blue micro-pulse on the downbeat, and vibrant purple accent outer wings `[0, 1, 6, 7]` + `65 ms` onboard Blue pulse halfway between beats ($t + 0.5 \times \text{period}$).
 - **Mode 3 — 4/4 Meter (`GREEN` = 1, `RED` = 2, 3, 4 + 2-LED Measure Step)**: Bright Green downbeat (`[0, 1]`), warm amber Beat 2 (`[2, 3]`), vivid teal Beat 3 (`[4, 5]`), and warm amber Beat 4 (`[6, 7]`).
 - **Mode 4 — 3/4 Meter (`GREEN` = 1, `RED` = 2, 3 + 3-2-3 Waltz Step)**: Bright Green downbeat (`[0, 1, 2]`), warm amber Beat 2 (`[3, 4]`), and warm amber Beat 3 (`[5, 6, 7]`).
-- **Pre-Lock Dimming**: All flashes are dimmed (`18%` / `12 ms` pulse) until the PLL locks onto a steady tempo.
+- **Pre-Lock Dimming**: All flashes are dimmed (`18%` / `10 ms` pulse) until the PLL locks onto a steady tempo.
 
 ### 3. Dual-Gesture IMU Mode Switching & 30s Inactivity Sleep
 Polled at 50 Hz over 400 kHz I2C (`LSM6DS3TR-C` @ 416 Hz ODR):

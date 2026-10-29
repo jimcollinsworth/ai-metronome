@@ -474,7 +474,7 @@ fn run_and_print_self_test<'a>(
     line.clear();
     let _ = writeln!(
         line,
-        "  [LED]  NeoPixel Stick   : Active on D0/P0.02 (CJMCU-2812-8, 8 pixels @ 22% glow)"
+        "  [LED]  NeoPixel Stick   : Active on D0/P0.02 (CJMCU-2812-8, 8 pixels @ 11% glow)"
     );
     usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
 
@@ -721,23 +721,13 @@ fn main() -> ! {
                 );
                 usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
             } else {
-                // Mode 2 (Mode2InBetween) downbeat click: show purple center anchor [3, 4] on NeoPixel stick!
-                if mode_engine.mode == MetronomeMode::Mode2InBetween {
-                    let anchor_frame = RgbLedController::render_beat_neopixels(
-                        MetronomeMode::Mode2InBetween,
-                        (mode_engine.beat_index as u8) | 1,
-                        false,
-                    );
-                    led.write_neopixel_frame(&dp.P0, &anchor_frame, 1.0);
-                    led.active_color = LedColor::Blue;
-                    led.off_deadline_sec = now_sec + 0.080;
-                }
+                // PLL already fired within +/-38% of this click; sync tempo & broadcast BLE
                 ble.broadcast_tempo(&dp.RADIO, mode_engine.bpm());
                 last_ble_adv_sec = now_sec;
                 line.clear();
                 let _ = writeln!(
                     line,
-                    "[CLICK #{:03}] HP_Peak={:4} Thresh={:3.0} Crest={:4.1} -> (PLL Sync / Mode 2 Upbeat Armed, {:.1} BPM)",
+                    "[CLICK #{:03}] HP_Peak={:4} Thresh={:3.0} Crest={:4.1} -> (PLL Sync / Beat Already Fired, {:.1} BPM)",
                     click_detector.click_count,
                     click_ev.hp_peak,
                     click_ev.threshold,

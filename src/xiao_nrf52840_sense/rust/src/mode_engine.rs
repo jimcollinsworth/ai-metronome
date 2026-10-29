@@ -352,7 +352,21 @@ impl MetronomeModeEngine {
             }
             MetronomeMode::Mode2InBetween => {
                 self.beat_index = self.beat_index.wrapping_add(1);
-                None
+                let dim_blue_bright = if locked {
+                    WEAK_BEAT_RED_BRIGHTNESS
+                } else {
+                    PRE_LOCK_BRIGHTNESS
+                };
+                Some(FlashEvent {
+                    color: LedColor::Blue,
+                    mode: self.mode,
+                    beat_in_bar: 1,
+                    bpm,
+                    scheduled_time_sec: event_time_sec,
+                    is_upbeat: false,
+                    brightness: dim_blue_bright,
+                    is_locked: locked,
+                })
             }
             MetronomeMode::Mode3FourFour => {
                 let beat_in_bar = ((self.beat_index % 4) + 1) as u8;
@@ -485,10 +499,30 @@ mod tests {
         let _ = eng.register_click(1.8);
         assert!((eng.bpm() - 150.0).abs() < 1.0);
 
-        // Suddenly slow down to 75 BPM (0.80s interval = 2x slower)
+        //Suddenly slow down to 75 BPM (0.80s interval = 2x slower)
         let _ = eng.register_click(2.6);
         let ev_slow = eng.register_click(3.4).unwrap();
         assert!(ev_slow.is_locked);
         assert!((eng.bpm() - 75.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn test_mode_2_on_beat_dim_blue_vs_off_beat_accent() {
+        let mut eng = MetronomeModeEngine::new();
+        eng.set_mode(MetronomeMode::Mode2InBetween);
+
+        let _ = eng.register_click(1.0).unwrap();
+        let _ = eng.register_click(1.5).unwrap();
+        let on_beat = eng.register_click(2.0).unwrap();
+        assert!(on_beat.is_locked);
+        assert!(!on_beat.is_upbeat);
+        assert_eq!(on_beat.color, LedColor::Blue);
+        assert!((on_beat.brightness - WEAK_BEAT_RED_BRIGHTNESS).abs() < 1e-5);
+
+        let off_beat = eng.poll(2.251).expect("Mode 2 off-beat accent should fire halfway");
+        assert!(off_beat.is_upbeat);
+        assert_eq!(off_beat.color, LedColor::Blue);
+        assert!((off_beat.brightness - LOCKED_BRIGHTNESS).abs() < 1e-5);
+        assert!(off_beat.brightness > on_beat.brightness * 4.0);
     }
 }

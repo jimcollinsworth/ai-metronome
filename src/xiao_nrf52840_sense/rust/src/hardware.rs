@@ -117,7 +117,7 @@ impl RgbLedController {
     pub const PIN_BLUE: usize = 6;
     pub const PIN_NEOPIXEL_D0: usize = 2; // D0 = P0.02
     pub const NEOPIXEL_COUNT: usize = 8;
-    pub const NEOPIXEL_BASE_BRIGHTNESS: f32 = 0.22;
+    pub const NEOPIXEL_BASE_BRIGHTNESS: f32 = 0.11;
 
     pub const fn new() -> Self {
         Self {
@@ -263,9 +263,9 @@ impl RgbLedController {
         self.flush_neopixels(p0);
     }
 
-    /// Render the 8-pixel CJMCU-2812-8 choreography matching CircuitPython v2.6:
+    /// Render the 8-pixel CJMCU-2812-8 choreography:
     /// - Mode 1 (On-Beat): Pendulum rock alternating left `[1,2,3]` and right `[4,5,6]` in warm amber-red `(255, 40, 0)`
-    /// - Mode 2 (Upbeat): Center anchor `[3,4]` in vibrant purple `(180, 0, 220)` on click; outer wings `[0,1,6,7]` in cyan-blue `(0, 120, 255)` on upbeat
+    /// - Mode 2 (Upbeat): Dim blue center anchor `[3,4]` `(0, 18, 45)` on the downbeat; bright purple accent outer wings `[0,1,6,7]` `(180, 0, 220)` on the off-beat (upbeat)
     /// - Mode 3 (4/4 Meter): 2-LED progressive measure bar (`[0,1]` Green, `[2,3]` Amber, `[4,5]` Teal, `[6,7]` Amber)
     /// - Mode 4 (3/4 Meter): 3-2-3 waltz triple step (`[0,1,2]` Green, `[3,4]` Amber, `[5,6,7]` Amber)
     pub fn render_beat_neopixels(
@@ -276,7 +276,8 @@ impl RgbLedController {
         let mut frame = [(0u8, 0u8, 0u8); 8];
 
         if is_upbeat {
-            let c = (0, 120, 255);
+            // Mode 2 Off-Beat (Upbeat Accent): vivid purple outer wings [XX....XX]
+            let c = (180, 0, 220);
             frame[0] = c;
             frame[1] = c;
             frame[6] = c;
@@ -298,7 +299,8 @@ impl RgbLedController {
                 }
             }
             MetronomeMode::Mode2InBetween => {
-                let c = (180, 0, 220);
+                // Mode 2 On-Beat (Downbeat): much dimmer blue center anchor [...XX...]
+                let c = (0, 18, 45);
                 frame[3] = c;
                 frame[4] = c;
             }
@@ -410,10 +412,10 @@ impl RgbLedController {
         self.clear_neopixels(p0);
     }
 
-    /// Start a non-blocking LED flash with retinal pulse-width dimming matching v2.6:
-    /// - Pre-lock (`brightness <= 0.19`): `12 ms` short pulse
-    /// - Weak-beat Red in 3/4 & 4/4 (`brightness <= 0.25`): `15 ms` short pulse
-    /// - Full locked downbeat / beat (`brightness > 0.25`): `130 ms` full pulse
+    /// Start a non-blocking LED flash with retinal pulse-width dimming (50% reduced brightness):
+    /// - Pre-lock (`brightness <= 0.19`): `10 ms` short pulse
+    /// - Weak-beat Red in 3/4 & 4/4 (`brightness <= 0.25`): `12 ms` short pulse
+    /// - Full locked downbeat / beat (`brightness > 0.25`): `65 ms` pulse
     pub fn start_flash(
         &mut self,
         p0: &p0::RegisterBlock,
@@ -426,11 +428,11 @@ impl RgbLedController {
             return;
         }
         let pulse_sec = if brightness <= PRE_LOCK_BRIGHTNESS + 0.01 {
-            0.012
+            0.010
         } else if brightness <= WEAK_BEAT_RED_BRIGHTNESS + 0.05 {
-            0.015
+            0.012
         } else {
-            0.130
+            0.065
         };
         self.set_color(p0, color);
         let rgb = match color {
@@ -461,11 +463,11 @@ impl RgbLedController {
             return;
         }
         let pulse_sec = if brightness <= PRE_LOCK_BRIGHTNESS + 0.01 {
-            0.012
+            0.010
         } else if brightness <= WEAK_BEAT_RED_BRIGHTNESS + 0.05 {
-            0.015
+            0.012
         } else {
-            0.130
+            0.065
         };
         self.set_color(p0, color);
         let frame = Self::render_beat_neopixels(mode, beat_in_bar, is_upbeat);
