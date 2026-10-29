@@ -59,8 +59,12 @@ When building bare-metal Embedded Rust (`thumbv7em-none-eabihf`, `nrf52840-hal` 
 5. **Unbuffered 512-Byte UF2 Block Writes & Continuous USB Polling**:
    - Write `.uf2` files in unbuffered 512-byte blocks (`buffering=0` + `os.fsync()`) or flash via official `adafruit-nrfutil dfu serial` (`--dev-type 0x0052 --sd-req 0x0123`).
    - Poll `usb_dev.poll(&mut [&mut serial])` during sensor power-up delays (`delay_ms_with_poll`) and PDM DMA waits (`capture_frame_with_poll`).
+6. **Continuous PDM DMA Streaming (Never Call `TASKS_STOP` on Every Frame)**:
+   - **Why**: Per Nordic nRF52840 Product Specification v1.3 (§6.15), restarting the PDM interface causes the internal hardware FIR decimation filter to take up to 32 samples to settle. Calling `tasks_stop` after every frame forces the decimation filter to reset, generating a massive 25,000-count step response transient at sample index 33 in *every single frame*, corrupting audio and deafening onset detectors.
+   - **Fix**: Start PDM DMA once and stream continuously across frames. Only call `tasks_stop` when explicitly sleeping the MCU or entering low-power mode.
 
 ### B. False Assumptions Removed (Do NOT Do)
+- **FALSE**: *"Calling `TASKS_STOP` between PDM EasyDMA frames resets DMA cleanly."* — Calling `TASKS_STOP` halts the PDM clock and forces the digital decimation filter to step-settle for 32 samples on every subsequent `TASKS_START`, creating a 25,000-count false onset transient at sample 33. Stream PDM continuously.
 - **FALSE**: *"Touching `USBD.USBPULLUP` or `USBD.ENABLE` manually before `Usbd::new()` fixes post-UF2 enumeration."* — Touching `USBD` registers before `nrf-usbd` initializes actually interferes with `nrf-usbd`'s internal power/event state machine; a clean `SCB::sys_reset()` trampoline is what resets `NRF_USBD` hardware properly.
 - **FALSE**: *"Enabling global interrupts (`cortex_m::interrupt::enable()`) helps `nrf-usbd` enumerate."* — Polling `usb_dev.poll()` works purely via registers with `PRIMASK=1`; enabling global interrupts without a `USBD` ISR vectors into `DefaultHandler`.
 - **FALSE**: *"Software `cortex_m::asm::delay()` bit-banging at 64 MHz drives WS2812B NeoPixels accurately."* — Loop/store overhead stretches `'0'` pulses past `550 ns`, causing WS2812B LEDs to latch `0xFFFFFF` (stuck full white). Always use hardware `NRF_PWM0` EasyDMA (`prescaler = DIV_1` 16 MHz, `countertop = 20` = 800 kHz, `DUTY_0 = 6 | 0x8000` = `375 ns`, `DUTY_1 = 13 | 0x8000` = `812.5 ns`).

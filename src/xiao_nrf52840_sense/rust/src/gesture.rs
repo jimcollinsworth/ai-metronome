@@ -184,7 +184,7 @@ impl SleepWakeController {
         Self {
             inactivity_timeout_sec: 30.0,
             sleep_motion_threshold_g: 0.08,
-            wake_motion_threshold_g: 0.12,
+            wake_motion_threshold_g: 0.28,
             is_sleeping: false,
             last_activity_sec: 0.0,
         }
@@ -205,7 +205,9 @@ impl SleepWakeController {
         }
 
         if self.is_sleeping {
-            if dyn_g >= self.wake_motion_threshold_g || jerk_g >= self.wake_motion_threshold_g {
+            // While sleeping, ONLY check jerk_g (actual dynamic inter-sample displacement).
+            // Do NOT check dyn_g because static tilt or resting offset on a table can have |mag - 1.0| > 0.
+            if jerk_g >= self.wake_motion_threshold_g {
                 self.is_sleeping = false;
                 self.last_activity_sec = now_sec;
                 return SleepTransition::WakeUp;
@@ -268,11 +270,11 @@ mod tests {
         );
         assert!(sw.is_sleeping);
 
-        // Slight noise doesn't wake
-        assert_eq!(sw.update_motion(0.03, 0.02, 45.0), SleepTransition::None);
+        // Slight resting noise doesn't wake
+        assert_eq!(sw.update_motion(0.03, 0.05, 45.0), SleepTransition::None);
 
-        // Picking up board (dyn_g = 0.25g) wakes it up!
-        assert_eq!(sw.update_motion(0.25, 0.20, 46.0), SleepTransition::WakeUp);
+        // Picking up board (jerk_g = 0.35g) wakes it up!
+        assert_eq!(sw.update_motion(0.20, 0.35, 46.0), SleepTransition::WakeUp);
         assert!(!sw.is_sleeping);
     }
 }

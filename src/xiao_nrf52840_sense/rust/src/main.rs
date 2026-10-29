@@ -53,6 +53,12 @@ impl<const N: usize> LineBuf<N> {
     }
 }
 
+impl<const N: usize> Default for LineBuf<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> Write for LineBuf<N> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let bytes = s.as_bytes();
@@ -155,9 +161,7 @@ fn poll_usb_and_read_cmd<'a>(
     power: &POWER,
     was_1200_armed: &mut bool,
 ) -> Option<u8> {
-    if !usb_dev.poll(&mut [serial]) {
-        return None;
-    }
+    let _ = usb_dev.poll(&mut [serial]);
 
     let rate = serial.line_coding().data_rate();
     let dtr = serial.dtr();
@@ -175,8 +179,8 @@ fn poll_usb_and_read_cmd<'a>(
     let mut rx_buf = [0u8; 16];
     if let Ok(count) = serial.read(&mut rx_buf) {
         if count > 0 {
-            // Return the last meaningful command byte in the packet
-            for &b in rx_buf[..count].iter().rev() {
+            // Return the first meaningful command byte in the packet
+            for &b in &rx_buf[..count] {
                 if b != b'\r' && b != b'\n' && b != 0x03 {
                     return Some(b);
                 }
@@ -334,20 +338,19 @@ fn run_and_print_self_test<'a>(
     usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
 
     let mut audio_buf = [0i16; PDM_FRAME_SAMPLES];
-    // Discard 2 warmup frames for DC filter settling while keeping USB polled
-    let _ = mic.capture_frame_with_poll(pdm, &mut audio_buf, || {
-        let _ = usb_dev.poll(&mut [serial]);
-    });
-    let _ = mic.capture_frame_with_poll(pdm, &mut audio_buf, || {
-        let _ = usb_dev.poll(&mut [serial]);
-    });
+    // Discard 20 warmup frames (100 ms) for PDM microphone DC filter settling while keeping USB polled
+    for _ in 0..20 {
+        let _ = mic.capture_frame_with_poll(pdm, &mut audio_buf, || {
+            let _ = usb_dev.poll(&mut [serial]);
+        });
+    }
     let dma_ok = mic.capture_frame_with_poll(pdm, &mut audio_buf, || {
         let _ = usb_dev.poll(&mut [serial]);
     });
 
     let mut s_min: i16 = i16::MAX;
     let mut s_max: i16 = i16::MIN;
-    for &s in &audio_buf {
+    for &s in audio_buf.iter() {
         if s < s_min {
             s_min = s;
         }
@@ -413,10 +416,11 @@ fn run_and_print_self_test<'a>(
         }
     }
 
-    // 3b. BLE 2.4 GHz Radio Advertiser Init & Broadcast Test ([BLE])
+    // 3b. BLE 2.4 GHz Radio Advertiser Status ([BLE])
     feed_watchdog(wdt);
     ble.init(radio, ficr);
-    ble.broadcast_tempo(radio, mode_engine.bpm());
+    // Keep radio transmitter powered off to eliminate 2.4 GHz RF coupling into PDM mic rail
+    radio.power.write(|w| w.power().disabled());
     line.clear();
     let _ = writeln!(
         line,
@@ -435,12 +439,12 @@ fn run_and_print_self_test<'a>(
     usb_send_bytes(usb_dev, serial, timer, timer0, line.as_bytes());
 
     let mut cal_peaks = [0i32; 25];
-    for i in 0..25 {
+    for p in &mut cal_peaks {
         let _ = mic.capture_frame_with_poll(pdm, &mut audio_buf, || {
             let _ = usb_dev.poll(&mut [serial]);
         });
         let (hp_peak, _, _, _) = ClickDetector::compute_hp_stats(&audio_buf);
-        cal_peaks[i] = hp_peak;
+        *p = hp_peak;
     }
     let floor = click_detector.calibrate_from_peaks(&cal_peaks);
     let trig_thresh = click_detector.current_threshold();
@@ -618,13 +622,13 @@ fn main() -> ! {
     sleep_controller.notify_activity(init_now_sec);
 
     let mut last_imu_poll_sec = init_now_sec;
-    let mut last_ble_adv_sec = init_now_sec;
     let mut last_dtr = false;
     let mut dtr_banner_replayed = false;
     let mut last_accel = (0.0f32, 0.0f32, 1.0f32);
     let mut last_dyn_g = 0.0f32;
     let mut last_jerk_g = 0.0f32;
     let mut frame_counter: u32 = 0;
+    let mut last_reported_bpm: f32 = 0.0;
     let mut line = LineBuf::<192>::new();
 
     // 7. Real-Time 200 Hz (5 ms PDM DMA frame) Main Loop
@@ -689,6 +693,7 @@ fn main() -> ! {
         // B. Process audio frame through high-pass click detector
         let click_ev = click_detector.process_frame(&audio_buf, now_sec);
         if click_ev.is_click {
+            let was_locked_before = mode_engine.is_locked;
             if let Some(flash) = mode_engine.register_click(click_ev.onset_time_sec) {
                 let np_beat = if mode_engine.mode == MetronomeMode::Mode1OnBeat {
                     mode_engine.beat_index as u8
@@ -704,37 +709,41 @@ fn main() -> ! {
                     flash.brightness,
                     now_sec,
                 );
-                ble.broadcast_tempo(&dp.RADIO, flash.bpm);
-                last_ble_adv_sec = now_sec;
-                line.clear();
-                let _ = writeln!(
-                    line,
-                    "[CLICK #{:03}] HP_Peak={:4} Thresh={:3.0} Crest={:4.1} -> {} (Beat {}, {:.1} BPM, Locked={})",
-                    click_detector.click_count,
-                    click_ev.hp_peak,
-                    click_ev.threshold,
-                    click_ev.crest_factor,
-                    flash.color.as_str(),
-                    flash.beat_in_bar,
-                    flash.bpm,
-                    flash.is_locked
-                );
-                usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                // Blank refractory window so mic ignores any switching artifact during the flash
+                click_detector.blank_refractory(now_sec);
+
+                // Pared-down, high-value serial reporting (no continuous beat spam):
+                if flash.is_locked && !was_locked_before {
+                    last_reported_bpm = flash.bpm;
+                    line.clear();
+                    let _ = writeln!(
+                        line,
+                        "[LOCK] Locked @ {:.1} BPM (Mode {})",
+                        flash.bpm, mode_engine.mode as u8
+                    );
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                } else if flash.is_locked && (flash.bpm - last_reported_bpm).abs() >= 1.5 {
+                    last_reported_bpm = flash.bpm;
+                    line.clear();
+                    let _ = writeln!(line, "[TEMPO] {:.1} BPM", flash.bpm);
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                } else if !flash.is_locked {
+                    line.clear();
+                    if flash.bpm > 0.0 {
+                        let _ = writeln!(line, "[CLICK] Tap detected ({:.1} BPM tentative)", flash.bpm);
+                    } else {
+                        let _ = writeln!(line, "[CLICK] Tap detected");
+                    }
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                }
             } else {
-                // PLL already fired within +/-38% of this click; sync tempo & broadcast BLE
-                ble.broadcast_tempo(&dp.RADIO, mode_engine.bpm());
-                last_ble_adv_sec = now_sec;
-                line.clear();
-                let _ = writeln!(
-                    line,
-                    "[CLICK #{:03}] HP_Peak={:4} Thresh={:3.0} Crest={:4.1} -> (PLL Sync / Beat Already Fired, {:.1} BPM)",
-                    click_detector.click_count,
-                    click_ev.hp_peak,
-                    click_ev.threshold,
-                    click_ev.crest_factor,
-                    mode_engine.bpm()
-                );
-                usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                // PLL already fired within +/-38% of this click; update last reported tempo if changed
+                if mode_engine.is_locked && (mode_engine.bpm() - last_reported_bpm).abs() >= 1.5 {
+                    last_reported_bpm = mode_engine.bpm();
+                    line.clear();
+                    let _ = writeln!(line, "[TEMPO] {:.1} BPM", mode_engine.bpm());
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                }
             }
 
             if mode_engine.is_locked {
@@ -744,6 +753,7 @@ fn main() -> ! {
 
         // C. Poll autonomous PLL beat / upbeat scheduler
         let now_pll_sec = timer.now_sec(&dp.TIMER0);
+        let was_locked_before_poll = mode_engine.is_locked;
         if let Some(sched_flash) = mode_engine.poll(now_pll_sec) {
             let np_beat = if mode_engine.mode == MetronomeMode::Mode1OnBeat {
                 mode_engine.beat_index as u8
@@ -759,30 +769,26 @@ fn main() -> ! {
                 sched_flash.brightness,
                 now_pll_sec,
             );
-            ble.broadcast_tempo(&dp.RADIO, sched_flash.bpm);
-            last_ble_adv_sec = now_pll_sec;
-            let tag = if sched_flash.is_upbeat {
-                "UPBEAT"
-            } else {
-                "PLL_BEAT"
-            };
+            // Blank refractory window so mic ignores any switching artifact during the flash
+            click_detector.blank_refractory(now_pll_sec);
+        } else if was_locked_before_poll && !mode_engine.is_locked {
+            // Coasting timed out -> cleanly returned to listening state!
+            last_reported_bpm = 0.0;
+            led.reset_listening_bar();
             line.clear();
             let _ = writeln!(
                 line,
-                "[{}] {} (Beat {}, {:.1} BPM, Locked={})",
-                tag,
-                sched_flash.color.as_str(),
-                sched_flash.beat_in_bar,
-                sched_flash.bpm,
-                sched_flash.is_locked
+                "[LISTENING] Silence -- listening for pattern (Mode: {}, Floor: {:.0}, Thresh: {:.0})",
+                mode_engine.mode.name(),
+                click_detector.noise_floor_peak,
+                click_detector.current_threshold()
             );
             usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
         }
 
-        // C2. Periodic BLE tempo advertisement every 200 ms (5 Hz) so Android Sensor Logger tracks smoothly
-        if (now_pll_sec - last_ble_adv_sec) >= 0.200 {
-            last_ble_adv_sec = now_pll_sec;
-            ble.broadcast_tempo(&dp.RADIO, mode_engine.bpm());
+        // If not locked and no beat flash is actively shining, update gentle listening bar
+        if !mode_engine.is_locked && led.active_color == LedColor::Off {
+            led.update_listening_bar(&dp.P0, now_sec);
         }
 
         // D. Poll USB Serial for debug & HIL commands
@@ -799,7 +805,7 @@ fn main() -> ! {
                     line.clear();
                     let _ = writeln!(
                         line,
-                        "[SERIAL] Switched to Mode {}: {}",
+                        "[KEY] Mode {}: {}",
                         target_mode as u8,
                         target_mode.name()
                     );
@@ -814,7 +820,7 @@ fn main() -> ! {
                     line.clear();
                     let _ = writeln!(
                         line,
-                        "[SERIAL] Cycled to Mode {}: {}",
+                        "[KEY] Cycled to Mode {}: {}",
                         new_mode as u8,
                         new_mode.name()
                     );
@@ -824,10 +830,29 @@ fn main() -> ! {
                     }
                 }
                 b'z' | b'Z' => {
+                    line.clear();
+                    let _ = writeln!(line, "[KEY] Sleep mode requested");
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
                     force_sleep = true;
                 }
-                b'r' | b'R' | 0x04 => {
-                    // 'r' or Ctrl-D (0x04 from xiao-cli hil-test): replay full hardware self-test
+                b'r' | b'R' => {
+                    mode_engine.reset_pattern();
+                    click_detector.reset();
+                    last_reported_bpm = 0.0;
+                    led.reset_listening_bar();
+                    sleep_controller.notify_activity(now_sec);
+                    line.clear();
+                    let _ = writeln!(
+                        line,
+                        "\r\n[RESET] Ready -- listening for pattern (Mode: {}, Floor: {:.0}, Thresh: {:.0})",
+                        mode_engine.mode.name(),
+                        click_detector.noise_floor_peak,
+                        click_detector.current_threshold()
+                    );
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                }
+                b't' | b'T' | 0x04 => {
+                    // 't' or Ctrl-D (0x04 from xiao-cli hil-test): replay full hardware self-test
                     run_and_print_self_test(
                         &mut usb_dev,
                         &mut serial,
@@ -969,8 +994,7 @@ fn main() -> ! {
                         line.clear();
                         let _ = writeln!(
                             line,
-                            "[SLEEP] No movement for {:.0}s -> Fading Blue LED & entering low-power sleep until movement...",
-                            sleep_controller.inactivity_timeout_sec
+                            "[SLEEP] Entering low-power sleep (shake/move board or send key to wake)..."
                         );
                         usb_send_bytes(
                             &mut usb_dev,
@@ -980,16 +1004,39 @@ fn main() -> ! {
                             line.as_bytes(),
                         );
 
+                        // Drain any remaining serial bytes before entering sleep so 'z' doesn't immediately wake it
+                        while poll_usb_and_read_cmd(
+                            &mut usb_dev,
+                            &mut serial,
+                            &dp.POWER,
+                            &mut was_1200_armed,
+                        )
+                        .is_some() {}
+
                         // 1. Fade Blue LED down smoothly, stop PDM DMA, and put IMU in 26 Hz low-power mode
                         led.fade_blue_to_sleep(&dp.P0, &mut timer, &dp.TIMER0);
                         mic.sleep(&dp.PDM);
                         imu.enter_low_power(&dp.TWIM0);
 
+                        // Allow IMU 80 ms to settle in low-power mode while keeping USB serviced
+                        let settle_start = timer.now_us(&dp.TIMER0);
+                        while timer.now_us(&dp.TIMER0).wrapping_sub(settle_start) < 80_000 {
+                            let _ = poll_usb_and_read_cmd(
+                                &mut usb_dev,
+                                &mut serial,
+                                &dp.POWER,
+                                &mut was_1200_armed,
+                            );
+                            timer.delay_us(&dp.TIMER0, 5_000);
+                        }
+
+                        // Read resting baseline acceleration
+                        let mut prev_accel = imu.read_accel_g(&dp.TWIM0).unwrap_or((0.0, 0.0, 1.0));
+
                         // 2. Low-power 20 Hz motion wake loop
-                        let mut prev_mag = 1.0f32;
                         loop {
                             feed_watchdog(&dp.WDT);
-                            // Poll USB so 1200-baud bootloader reset or wake key works even while asleep
+                            // Poll USB so any key press or 1200-baud touch wakes the unit
                             if let Some(wake_cmd) = poll_usb_and_read_cmd(
                                 &mut usb_dev,
                                 &mut serial,
@@ -1003,13 +1050,14 @@ fn main() -> ! {
                             }
 
                             if let Ok((sx, sy, sz)) = imu.read_accel_g(&dp.TWIM0) {
-                                let mag = libm::sqrtf(sx * sx + sy * sy + sz * sz);
-                                let s_dyn = libm::fabsf(mag - 1.0);
-                                let s_jerk = libm::fabsf(mag - prev_mag);
-                                prev_mag = mag;
+                                let dx = sx - prev_accel.0;
+                                let dy = sy - prev_accel.1;
+                                let dz = sz - prev_accel.2;
+                                let jerk = libm::sqrtf(dx * dx + dy * dy + dz * dz);
+                                prev_accel = (sx, sy, sz);
 
                                 let w_now = timer.now_sec(&dp.TIMER0);
-                                if sleep_controller.update_motion(s_dyn, s_jerk, w_now)
+                                if sleep_controller.update_motion(0.0, jerk, w_now)
                                     == SleepTransition::WakeUp
                                 {
                                     break;
@@ -1029,22 +1077,54 @@ fn main() -> ! {
                             }
                         }
 
-                        // 3. Restore 416 Hz IMU + 16 kHz PDM DMA and blink Green 2x on wake
+                        // 3. Restore 416 Hz IMU + 16 kHz PDM DMA, reset pattern & detector, and run rainbow sweep on wake
                         imu.restore_active(&dp.TWIM0);
                         mic.wake(&dp.PDM);
-                        led.signal_wake(&dp.P0, &mut timer, &dp.TIMER0);
+                        mode_engine.reset_pattern();
+                        click_detector.reset();
+                        last_reported_bpm = 0.0;
+
+                        // Discard 2 warmup frames from PDM mic before running rainbow sweep to clear any DC/power transients
+                        let mut discard_buf = [0i16; PDM_FRAME_SAMPLES];
+                        let _ = mic.capture_frame_with_poll(&dp.PDM, &mut discard_buf, || {
+                            let _ = usb_dev.poll(&mut [&mut serial]);
+                        });
+                        let _ = mic.capture_frame_with_poll(&dp.PDM, &mut discard_buf, || {
+                            let _ = usb_dev.poll(&mut [&mut serial]);
+                        });
+
+                        // Quick, beautiful low-brightness rainbow sweep across the 8 NeoPixels
+                        led.run_rainbow_sweep(&dp.P0, &mut timer, &dp.TIMER0, || {
+                            let _ = usb_dev.poll(&mut [&mut serial]);
+                        });
+
+                        // Recalibrate ambient noise floor over 15 fresh quiet frames so it's perfectly tuned to the room
+                        let mut wake_cal = [0i32; 15];
+                        for p in &mut wake_cal {
+                            let _ = mic.capture_frame_with_poll(&dp.PDM, &mut discard_buf, || {
+                                let _ = usb_dev.poll(&mut [&mut serial]);
+                            });
+                            let (hp_peak, _, _, _) = ClickDetector::compute_hp_stats(&discard_buf);
+                            *p = hp_peak;
+                        }
+                        let wake_floor = click_detector.calibrate_from_peaks(&wake_cal);
 
                         let wake_sec = timer.now_sec(&dp.TIMER0);
                         sleep_controller.is_sleeping = false;
                         sleep_controller.notify_activity(wake_sec);
                         shake_classifier.reset_after_wake(wake_sec);
+                        led.reset_listening_bar();
+                        // Blank refractory window so the wake sequence cannot trigger an onset
+                        click_detector.blank_refractory(wake_sec);
                         last_imu_poll_sec = wake_sec;
 
                         line.clear();
                         let _ = writeln!(
                             line,
-                            "[WAKE] Movement detected -> CPU & PDM Mic resumed (Mode: {})",
-                            mode_engine.mode.name()
+                            "[WAKE] Ready -- listening for pattern (Mode: {}, Floor: {:.0}, Thresh: {:.0})",
+                            mode_engine.mode.name(),
+                            wake_floor,
+                            click_detector.current_threshold()
                         );
                         usb_send_bytes(
                             &mut usb_dev,

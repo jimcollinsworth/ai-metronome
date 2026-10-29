@@ -4,6 +4,72 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-29 — PDM Continuous Streaming Fix, Silence Coasting Timeout, Clean Reset & Cyan Radar Listening Bar
+
+> [!NOTE] User Instructions & Guidance:
+> - *"lets pick up with the bugs, it's not listening and locking, seems to reset to the same old tempo. lets add some led bar indication when listening so thats clear (has to be very different than all the other led patterns). make sure everything starts over on reset and listens"*
+
+### ADR 020: PDM Continuous Streaming (Eliminating 32-Sample Filter Transient), Silence Timeout, Fresh Tempo Onset & Cyan Radar Listening Bar
+- **Context**:
+  1. The metronome was failing to detect acoustic metronomes placed directly beside the board, repeatedly locking to a stale tempo (~250 BPM) or retaining old tempos across pauses.
+  2. Hardware trace diagnostics uncovered a critical PDM interface bug: `capture_frame_with_poll` was calling `pdm.tasks_stop` after every single 5 ms frame. Per Nordic nRF52840 PS v1.3 (§6.15), restarting the PDM interface triggers an internal FIR decimation filter step response lasting up to 32 samples. This generated a massive 25,000-count digital spike at sample index 33 in *every single frame*, driving ambient noise calibration to the 320.0 clamp and deafening the detector with an artificial 550 threshold.
+  3. `MetronomeModeEngine` was configured to coast indefinitely during silence, and any click received after a $> 2.0\text{ s}$ gap deliberately retained the old tempo and phase instead of starting a fresh pattern.
+  4. There was no distinct visual feedback on the 8 NeoPixels indicating when the board was actively listening versus sitting idle or between beats.
+- **Decision**:
+  1. **Continuous PDM DMA Streaming**:
+     - Removed per-frame `tasks_stop` from `capture_frame_with_poll`. The PDM peripheral now runs continuously, eliminating clock/filter restart transients completely.
+     - Frame signal span dropped from 3,565 counts down to 107–184 counts. Calibrated ambient noise floor dropped from saturated 320.0 down to a pristine 35.0–58.0 with a sharp, sensitive 95–151 threshold.
+  2. **Silence Coasting Timeout & Fresh Pattern Reset**:
+     - Added `max_coast_beats: u8 = 8` to `MetronomeModeEngine`. After coasting for 8 beats with no acoustic sound, the PLL cleanly drops out of lock, clears tempo/phase, and transitions back to the Listening state.
+     - Modified `register_click`: Any click arriving after a gap $> 2.0\text{ s}$ immediately clears old tempo state and starts fresh as Beat 1 of a new tempo sequence.
+  3. **Dedicated Reset Key (`r` / `R`)**:
+     - Kept hardware self-test on `t` / `T` / `0x04`; re-assigned `r` / `R` to instantly reset pattern, reset click detector noise floor, and resume listening.
+  4. **Cyan Radar Listening Bar (`update_listening_bar`)**:
+     - Added a gentle, low-brightness Cyan (`0, 150, 175`) radar scan gracefully sweeping back and forth across the 8 NeoPixels at ~75 ms per step (~3.3% effective brightness).
+     - Distinct from stationary 35 ms beat flashes: provides immediate, unmistakable confirmation that the metronome is awake and listening.
+- **Verification**:
+  - All 15 host unit tests passed. Clippy clean (0 warnings).
+  - Deployed to hardware on `COM10`: 7-point HIL verification passed 7/7 with ambient noise floor at 58.0 and threshold at 151.
+
+---
+
+## 2026-10-29 — Serial Output Optimization, Unblocked USB CDC Keystroke Polling, Wake Pattern Reset & Rainbow Sweep
+
+> [!NOTE] User Instructions & Guidance:
+> - *"lets verify/test/stabilize current code (no midi bluetooth yet) in the app. we digressed some. put midi bt on hold for now (update planning.md)*
+> - *1. too much debug output on monitor - pare it way down.*
+> - *2. it seems like monitor doesn't respond to my key commands, but that could be due to all the output overhead.*
+> - *3. on wake up we want to reset and listen for another pattern. this will allow us to cleanly reinitialize anything that gets out of sync, or just isn't needed to be retained, or is good for memory use. Lets display a quick but beautiful startup sequence - we'll add some variations later. maybe a quick sweep across the leds, rainbow like, not bright, keep it down.*
+> - *check for unused code, features, unnecessary states, variables. poor memory utilization for embedded rust"*
+
+### ADR 019: Serial Stream Optimization, Always-Drained USB CDC RX, Wake Pattern Reset & Soft Rainbow Sweep
+- **Context**:
+  1. A standalone BLE-MIDI test binary had been flashed that was spewing periodic telemetry over USB CDC every few hundred milliseconds, flooding the terminal and preventing clean interactive serial monitor control.
+  2. In the main Rust firmware (`ai-metronome-rust`), every detected click and every autonomous PLL beat tick was printing a formatted string over USB CDC. At 120–250 BPM, this output saturated serial buffers and drowned user key commands.
+  3. In `poll_usb_and_read_cmd`, `if !usb_dev.poll(&mut [serial]) { return None; }` aborted early before calling `serial.read()` whenever an earlier USB poll had already processed the bus event. This left unread keystrokes stranded in the `SerialPort` ring buffer.
+  4. On waking from 30s inactivity sleep, the metronome retained its previous locked tempo and phase, continuing to coast the old beat instead of clearing state to lock onto a new acoustic tempo pattern.
+- **Decision**:
+  1. **Put BLE-MIDI on Hold**:
+     - Updated `PLANNING.md` to place MIDI Bluetooth on hold.
+     - Set `autobins = false` and removed `btmidi-test` from `Cargo.toml`; removed `pub mod ble_midi` from `src/lib.rs`.
+  2. **Pared Down Serial Debug Output**:
+     - Eliminated continuous repetitive `[PLL_BEAT]` and `[UPBEAT]` spam completely. Real-time beats are visually communicated via the NeoPixel stick and onboard RGB LED.
+     - Streamlined click reporting to high-value transition events only: `[CLICK] Tap detected`, `[LOCK] Locked @ X.X BPM`, and `[TEMPO] X.X BPM` when locked tempo adjusts significantly ($\ge 1.5$ BPM). Full diagnostic dumps remain instantly accessible on demand via the `d` / `s` keystroke.
+  3. **Guaranteed USB CDC Keystroke Draining**:
+     - Refactored `poll_usb_and_read_cmd` to always call `serial.read(&mut rx_buf)` regardless of `usb_dev.poll` return value, ensuring any incoming keystrokes (`1`..`4`, `m`, `d`, `r`, `z`, `b`) are read and executed immediately with clear command echo feedback.
+  4. **Clean Wake-Up Reset**:
+     - Added `mode_engine.reset_pattern()` to clear locked state, beat period, phase, and coast counters on wake-up while preserving the active mode.
+     - Added `click_detector.reset()` to reset click counts and reset quiet peak to calibrated baseline.
+     - Broadcasts `0.0 BPM` over BLE advertising so external receivers detect the reset.
+  5. **Low-Brightness Rainbow Sweep (`run_rainbow_sweep`)**:
+     - Created an 8-LED spectral sweep across the CJMCU-2812-8 stick on `D0` / `P0.02` (Soft Red, Orange, Amber, Green, Cyan, Blue, Purple, Magenta) at $\approx 4.4\%$ effective brightness ($\approx 40\%$ of base $11\%$).
+     - Fluid 18 ms/pixel comet sweep + 45 ms full shimmer ($\approx 209\text{ ms}$ total sequence) executed on boot and upon waking from sleep.
+  6. **Embedded Rust Code & Memory Audit**:
+     - Resolved clippy warnings across `main.rs` and `hardware.rs` (unused variables, redundant assignments, and argument counts). Flash size is 62.1 KB ($< 8\%$ of available 792 KB), application RAM is $< 2.5\text{ KB}$, and all 14 host unit tests pass.
+     - Verified hands-free on physical hardware (`COM10`): HIL test passed all 7/7 checkpoints in $1.05\text{s}$, and interactive monitor keys (`1`..`4`, `m`, `d`, `z`) responded instantaneously.
+
+---
+
 ## 2026-10-28 — Proven Rust UF2/DFU Deployment, Clean-Boot `SCB::sys_reset()` Trampoline & 7-Point HIL Pass (`COM10`)
 
 > [!NOTE] User Instructions & Guidance:

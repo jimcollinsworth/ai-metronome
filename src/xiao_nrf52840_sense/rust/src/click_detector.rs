@@ -54,6 +54,20 @@ impl ClickDetector {
         }
     }
 
+    /// Reset transient click counters and baseline tracking state to listen fresh for a new pattern.
+    pub fn reset(&mut self) {
+        self.click_count = 0;
+        self.last_click_time_sec = -10.0;
+        self.noise_floor_peak = 55.0;
+        self.prev_quiet_peak = 55.0;
+    }
+
+    /// Blank the detector for the refractory period (e.g. when firing an LED flash or waking up)
+    /// to prevent self-triggering off electrical switching transients.
+    pub fn blank_refractory(&mut self, now_sec: f64) {
+        self.last_click_time_sec = now_sec;
+    }
+
     /// Compute first-difference high-pass statistics (`(hp_peak, hp_mean, crest, peak_idx)`).
     pub fn compute_hp_stats(samples: &[i16]) -> (i32, f32, f32, usize) {
         let n = samples.len();

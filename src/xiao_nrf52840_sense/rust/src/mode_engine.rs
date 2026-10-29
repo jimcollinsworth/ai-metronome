@@ -107,7 +107,8 @@ pub struct MetronomeModeEngine {
     next_beat_time_sec: Option<f64>,
     next_upbeat_time_sec: Option<f64>,
     last_fired_beat_time_sec: f64,
-    coasted_beats: u8,
+    pub coasted_beats: u8,
+    pub max_coast_beats: u8,
     prev_dt_sec: Option<f64>,
 }
 
@@ -132,6 +133,7 @@ impl MetronomeModeEngine {
             next_upbeat_time_sec: None,
             last_fired_beat_time_sec: -10.0,
             coasted_beats: 0,
+            max_coast_beats: 8,
             prev_dt_sec: None,
         }
     }
@@ -163,12 +165,26 @@ impl MetronomeModeEngine {
         self.set_mode(next)
     }
 
+    /// Cleanly reset the tempo, phase, and locked state to listen for a new pattern,
+    /// while preserving the selected metronome mode.
+    pub fn reset_pattern(&mut self) {
+        self.beat_period_sec = None;
+        self.last_click_time_sec = None;
+        self.beat_index = 0;
+        self.is_locked = false;
+        self.locked_intervals = 0;
+        self.next_beat_time_sec = None;
+        self.next_upbeat_time_sec = None;
+        self.last_fired_beat_time_sec = -10.0;
+        self.coasted_beats = 0;
+        self.prev_dt_sec = None;
+    }
+
     /// Register a detected acoustic click at `click_time_sec`.
     /// Returns `Some(FlashEvent)` if an immediate visual flash should fire.
     pub fn register_click(&mut self, click_time_sec: f64) -> Option<FlashEvent> {
         let prev_click = self.last_click_time_sec;
         let mut ioi: Option<f64> = None;
-        let mut resumed_after_gap = false;
 
         if let Some(prev) = prev_click {
             let delta = click_time_sec - prev;
@@ -178,27 +194,15 @@ impl MetronomeModeEngine {
             if delta <= self.max_ioi_sec {
                 ioi = Some(delta);
             } else {
-                // Gap > 2.0s after sound stopped: keep flywheel tempo & lock, resync phase to Beat 1!
-                resumed_after_gap = true;
-                self.prev_dt_sec = None;
+                // Gap > 2.0s after sound stopped: clean reset and treat this click as fresh Beat 1!
+                self.reset_pattern();
+                self.last_click_time_sec = Some(click_time_sec);
+                return self.fire_beat(click_time_sec);
             }
         }
 
         self.last_click_time_sec = Some(click_time_sec);
         self.coasted_beats = 0;
-
-        if resumed_after_gap {
-            self.beat_index = 0;
-            if let Some(period) = self.beat_period_sec {
-                self.next_beat_time_sec = Some(click_time_sec + period);
-                if self.mode == MetronomeMode::Mode2InBetween {
-                    self.next_upbeat_time_sec = Some(click_time_sec + (period * 0.5));
-                } else {
-                    self.next_upbeat_time_sec = None;
-                }
-            }
-            return self.fire_beat(click_time_sec);
-        }
 
         if let Some(interval) = ioi {
             match self.beat_period_sec {
@@ -311,11 +315,15 @@ impl MetronomeModeEngine {
             }
         }
 
-        // 2. Autonomous beat clock check (freewheels indefinitely until next sound resyncs)
+        // 2. Autonomous beat clock check (flywheels through pauses, then times out to listening)
         let next_beat = self.next_beat_time_sec?;
         if now_sec >= next_beat {
             let event_time = next_beat;
             self.coasted_beats = self.coasted_beats.saturating_add(1);
+            if self.coasted_beats > self.max_coast_beats {
+                self.reset_pattern();
+                return None;
+            }
             self.next_beat_time_sec = Some(event_time + period);
             if self.mode == MetronomeMode::Mode2InBetween {
                 self.next_upbeat_time_sec = Some(event_time + (period * 0.5));
@@ -474,10 +482,10 @@ mod tests {
         assert!(eng.is_locked);
         assert!((eng.bpm() - 120.0).abs() < 1.0);
 
-        // Coast for 8 beats (4.0 seconds) without any clicks -> stays locked and keeps firing!
-        for i in 1..=8 {
+        // Coast for 6 beats (3.0 seconds) without any clicks -> stays locked and keeps firing!
+        for i in 1..=6 {
             let t = 2.0 + (i as f64) * 0.5 + 0.001;
-            let ev = eng.poll(t).expect("Flywheel should continue coasting indefinitely");
+            let ev = eng.poll(t).expect("Flywheel should continue coasting");
             assert!(ev.is_locked);
             assert!((ev.bpm - 120.0).abs() < 1.0);
         }
@@ -485,7 +493,7 @@ mod tests {
         // Switch mode to Mode 3 (4/4) while coasting -> preserves tempo & lock!
         eng.set_mode(MetronomeMode::Mode3FourFour);
         assert!(eng.is_locked);
-        let ev_m3 = eng.poll(6.501).expect("Mode 3 should immediately coast at same speed");
+        let ev_m3 = eng.poll(5.501).expect("Mode 3 should immediately coast at same speed");
         assert_eq!(ev_m3.color, LedColor::Green);
         assert_eq!(ev_m3.beat_in_bar, 1);
     }
@@ -524,5 +532,54 @@ mod tests {
         assert_eq!(off_beat.color, LedColor::Blue);
         assert!((off_beat.brightness - LOCKED_BRIGHTNESS).abs() < 1e-5);
         assert!(off_beat.brightness > on_beat.brightness * 4.0);
+    }
+
+    #[test]
+    fn test_reset_pattern_clears_tempo_and_lock_preserves_mode() {
+        let mut eng = MetronomeModeEngine::new();
+        eng.set_mode(MetronomeMode::Mode3FourFour);
+        let _ = eng.register_click(1.0);
+        let _ = eng.register_click(1.5);
+        let _ = eng.register_click(2.0);
+        assert!(eng.is_locked);
+        assert_eq!(eng.mode, MetronomeMode::Mode3FourFour);
+        assert!((eng.bpm() - 120.0).abs() < 1.0);
+
+        eng.reset_pattern();
+        assert_eq!(eng.mode, MetronomeMode::Mode3FourFour);
+        assert!(!eng.is_locked);
+        assert_eq!(eng.bpm(), 0.0);
+        assert_eq!(eng.beat_period_sec, None);
+        assert_eq!(eng.poll(2.5), None);
+    }
+
+    #[test]
+    fn test_silence_gap_and_coasting_timeout_resets_to_listening() {
+        let mut eng = MetronomeModeEngine::new();
+        // 1. Lock at 120 BPM (0.50s period)
+        let _ = eng.register_click(1.0);
+        let _ = eng.register_click(1.5);
+        let ev = eng.register_click(2.0).unwrap();
+        assert!(ev.is_locked);
+        assert!((eng.bpm() - 120.0).abs() < 1.0);
+
+        // 2. Coast for 8 beats (up to 6.0s)
+        for i in 1..=8 {
+            let t = 2.0 + (i as f64) * 0.5 + 0.001;
+            assert!(eng.poll(t).is_some());
+        }
+        // Beat 9 exceeds max_coast_beats (8) -> cleanly resets to listening!
+        let t9 = 2.0 + 9.0 * 0.5 + 0.001;
+        assert_eq!(eng.poll(t9), None);
+        assert!(!eng.is_locked);
+        assert_eq!(eng.beat_period_sec, None);
+
+        // 3. Silence gap of 5 seconds, then new metronome starts at 80 BPM (0.75s)
+        let _ = eng.register_click(12.0); // Beat 1
+        assert!(!eng.is_locked);
+        let _ = eng.register_click(12.75); // Beat 2
+        let ev_locked = eng.register_click(13.50).unwrap(); // Beat 3
+        assert!(ev_locked.is_locked);
+        assert!((eng.bpm() - 80.0).abs() < 1.5);
     }
 }

@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI-Metronome — BLE-MIDI Configuration & Live Monitor</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel-border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --green: #22c55e;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    .container {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      padding-bottom: 16px;
+      margin-bottom: 20px;
+      border-bottom: 1px solid var(--panel-border);
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.45rem;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.88rem;
+      margin-top: 3px;
+    }
+    .conn-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    button {
+      background: #334155;
+      color: var(--text);
+      border: 1px solid #475569;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    button:hover { background: #475569; }
+    button.primary {
+      background: #0284c7;
+      border-color: #38bdf8;
+    }
+    button.primary:hover { background: #0369a1; }
+    button.success {
+      background: #15803d;
+      border-color: #22c55e;
+    }
+    button.danger {
+      background: #b91c1c;
+      border-color: #ef4444;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 11px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      background: #334155;
+      color: var(--muted);
+    }
+    .badge.adv { background: rgba(245, 158, 11, 0.18); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+    .badge.conn { background: rgba(56, 189, 248, 0.18); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
+    .badge.sub { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.45); }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 18px;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 18px;
+    }
+    .card h2 {
+      margin: 0 0 14px 0;
+      font-size: 1.05rem;
+      color: var(--accent);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .neopixel-strip {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 10px;
+      background: #090d16;
+      padding: 14px;
+      border-radius: 10px;
+      border: 1px solid #1e293b;
+      margin-bottom: 14px;
+    }
+    .pixel {
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: #1e293b;
+      border: 2px solid #334155;
+      transition: transform 0.06s ease, background 0.06s ease, box-shadow 0.06s ease;
+    }
+    .pixel.active-downbeat {
+      background: #22c55e;
+      border-color: #86efac;
+      box-shadow: 0 0 18px #22c55e;
+      transform: scale(1.1);
+    }
+    .pixel.active-beat {
+      background: #38bdf8;
+      border-color: #bae6fd;
+      box-shadow: 0 0 16px #38bdf8;
+      transform: scale(1.07);
+    }
+    .preset-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .preset-btn {
+      text-align: left;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #0f172a;
+      border: 1px solid #334155;
+    }
+    .preset-btn:hover { border-color: var(--accent); }
+    .preset-btn strong { display: block; font-size: 0.88rem; color: var(--text); }
+    .preset-btn span { font-size: 0.76rem; color: var(--muted); }
+    .control-group {
+      margin-bottom: 14px;
+    }
+    .control-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.86rem;
+      margin-bottom: 6px;
+      color: #cbd5e1;
+    }
+    .bpm-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent);
+    }
+    input[type="number"], select {
+      background: #0f172a;
+      color: var(--text);
+      border: 1px solid #475569;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.9rem;
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+    .kv-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    .kv-box {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .kv-label {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .kv-val {
+      font-size: 1.05rem;
+      font-weight: 700;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      margin-top: 2px;
+    }
+    .log-box {
+      background: #090d16;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      height: 220px;
+      overflow-y: auto;
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.78rem;
+      color: #cbd5e1;
+    }
+    .log-line { margin-bottom: 3px; white-space: pre-wrap; word-break: break-all; }
+    .log-evt { color: #38bdf8; font-weight: 600; }
+    .toggle-row {
+      display: flex;
+      gap: 16px;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #334155;
+      flex-wrap: wrap;
+    }
+    label.checkbox {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 0.88rem;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>AI-Metronome — BLE-MIDI Config &amp; Monitor</h1>
+        <div class="subtitle">
+          Seeed Studio XIAO nRF52840 Sense • CME WIDI Jack &amp; iPad Pianoteq Test Suite
+        </div>
+      </div>
+      <div class="conn-bar">
+        <span id="transportBadge" class="badge">Transport: Disconnected</span>
+        <span id="bleStateBadge" class="badge adv">BLE: ADVERTISING</span>
+        <button id="btnUsbSerial" class="primary" onclick="connectWebSerial()">Connect USB Serial (COM)</button>
+        <button id="btnWebBle" onclick="connectWebBluetooth()">Connect Web Bluetooth</button>
+      </div>
+    </header>
+
+    <div class="grid">
+      <!-- Left Column: Configuration & Transport Controls -->
+      <div>
+        <div class="card">
+          <h2>
+            <span>1. Target Device Presets</span>
+            <span style="font-size: 0.78rem; color: var(--muted); font-weight: normal;">One-Click Setup</span>
+          </h2>
+          <div class="preset-row">
+            <button class="preset-btn" onclick="applyPreset('WIDI')">
+              <strong>CME WIDI Jack</strong>
+              <span>Ch 10 GM Woodblock (76/77) + 24 PPQN Clock</span>
+            </button>
+            <button class="preset-btn" onclick="applyPreset('PIANOTEQ')">
+              <strong>iPad Pianoteq</strong>
+              <span>Ch 1 Staccato C6/C5 (84/72) + 24 PPQN Clock</span>
+            </button>
+            <button class="preset-btn" onclick="applyPreset('CLOCK')">
+              <strong>Clock Sync Only</strong>
+              <span>24 PPQN (0xF8) Tempo Lock • No Note Triggers</span>
+            </button>
+          </div>
+
+          <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;">
+            <button id="btnRunToggle" class="success" onclick="toggleRun()">⏸ Pause Beat</button>
+            <button class="primary" onclick="triggerSingleNote()">🔊 Trigger Test Note Now</button>
+            <button onclick="tapTempo()">👆 Tap Tempo</button>
+            <button class="danger" onclick="disconnectBlePeer()" title="Drops current BLE peer so you can switch between WIDI Jack and iPad">
+              🔄 Disconnect BLE Peer
+            </button>
+          </div>
+
+          <div class="control-group">
+            <div class="control-header">
+              <span>Fixed Beat Tempo (BPM)</span>
+              <strong id="bpmLabel">120.0 BPM</strong>
+            </div>
+            <div class="bpm-row">
+              <button onclick="nudgeBpm(-5)">-5</button>
+              <button onclick="nudgeBpm(-1)">-1</button>
+              <input id="bpmSlider" type="range" min="30" max="240" step="0.5" value="120" oninput="onBpmInput(this.value)" onchange="sendParam('BPM', this.value, 0x02, Math.round(this.value * 10))" />
+              <button onclick="nudgeBpm(1)">+1</button>
+              <button onclick="nudgeBpm(5)">+5</button>
+              <input id="bpmInput" type="number" min="30" max="240" step="0.5" value="120.0" style="width: 78px;" onchange="onBpmInput(this.value); sendParam('BPM', this.value, 0x02, Math.round(this.value * 10))" />
+            </div>
+          </div>
+
+          <div class="form-grid">
+            <div class="control-group">
+              <div class="control-header"><span>Meter (Beats / Bar)</span></div>
+              <select id="meterSelect" style="width: 100%;" onchange="sendParam('METER', this.value, 0x03, parseInt(this.value))">
+                <option value="4" selected>4/4 (Quadruple)</option>
+                <option value="3">3/4 (Waltz / Triple)</option>
+                <option value="2">2/4 (Duple March)</option>
+                <option value="1">1/4 (Every Beat Accent)</option>
+                <option value="6">6/8 (Compound)</option>
+              </select>
+            </div>
+
+            <div class="control-group">
+              <div class="control-header"><span>MIDI Channel (1–16)</span></div>
+              <select id="channelSelect" style="width: 100%;" onchange="sendParam('CH', this.value, 0x04, parseInt(this.value))">
+                <option value="1">Channel 1 (Pianoteq / Synth Lead)</option>
+                <option value="2">Channel 2</option>
+                <option value="3">Channel 3</option>
+                <option value="4">Channel 4</option>
+                <option value="10" selected>Channel 10 (GM Standard Drums/Percussion)</option>
+                <option value="16">Channel 16</option>
+              </select>
+            </div>
+
+            <div class="control-group">
+              <div class="control-header">
+                <span>Downbeat (Beat 1) Note</span>
+                <span id="accentNoteName" style="color: var(--accent);">76 (E5 / Hi Woodblock)</span>
+              </div>
+              <input id="accentNote" type="number" min="0" max="127" value="76" style="width: 100%;" onchange="updateNoteLabels(); sendParam('ACCENT', this.value, 0x05, parseInt(this.value))" />
+            </div>
+
+            <div class="control-group">
+              <div class="control-header">
+                <span>Downbeat Velocity</span>
+                <span id="accentVelLabel">120</span>
+              </div>
+              <input id="accentVel" type="range" min="1" max="127" value="120" oninput="document.getElementById('accentVelLabel').textContent=this.value" onchange="sendParam('VEL_ACCENT', this.value, 0x06, parseInt(this.value))" />
+            </div>
+
+            <div class="control-group">
+              <div class="control-header">
+                <span>Weak Beat (2..N) Note</span>
+                <span id="beatNoteName" style="color: var(--accent);">77 (F5 / Lo Woodblock)</span>
+              </div>
+              <input id="beatNote" type="number" min="0" max="127" value="77" style="width: 100%;" onchange="updateNoteLabels(); sendParam('BEAT', this.value, 0x07, parseInt(this.value))" />
+            </div>
+
+            <div class="control-group">
+              <div class="control-header">
+                <span>Weak Beat Velocity</span>
+                <span id="beatVelLabel">80</span>
+              </div>
+              <input id="beatVel" type="range" min="1" max="127" value="80" oninput="document.getElementById('beatVelLabel').textContent=this.value" onchange="sendParam('VEL_BEAT', this.value, 0x08, parseInt(this.value))" />
+            </div>
+          </div>
+
+          <div class="control-group" style="margin-top: 6px;">
+            <div class="control-header">
+              <span>Note Gate Duration (ms before Note-Off)</span>
+              <span id="gateLabel">25 ms</span>
+            </div>
+            <input id="gateSlider" type="range" min="5" max="250" step="5" value="25" style="width: 100%;" oninput="document.getElementById('gateLabel').textContent=this.value+' ms'" onchange="sendParam('GATE', this.value, 0x09, parseInt(this.value))" />
+          </div>
+
+          <div class="toggle-row">
+            <label class="checkbox">
+              <input id="chkSendNotes" type="checkbox" checked onchange="sendParam('NOTES', this.checked ? 1 : 0, 0x0A, this.checked ? 1 : 0)" />
+              Send MIDI Notes (Note-On / Note-Off)
+            </label>
+            <label class="checkbox">
+              <input id="chkSendClock" type="checkbox" checked onchange="sendParam('CLOCK', this.checked ? 1 : 0, 0x0B, this.checked ? 1 : 0)" />
+              Send 24 PPQN Real-Time Clock (0xF8)
+            </label>
+            <label class="checkbox">
+              <input id="chkBrowserAudio" type="checkbox" />
+              Play Local Browser WebAudio Click
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Live Beat Visualizer & BLE Radio Telemetry -->
+      <div>
+        <div class="card">
+          <h2>
+            <span>2. Live NeoPixel &amp; Beat Monitor</span>
+            <span id="beatCounterDisplay" style="font-family: monospace; font-size: 1.1rem;">BEAT 1 / 4</span>
+          </h2>
+          <div id="neopixelStrip" class="neopixel-strip">
+            <div class="pixel active-downbeat"></div>
+            <div class="pixel"></div>
+            <div class="pixel"></div>
+            <div class="pixel"></div>
+            <div class="pixel"></div>
+            <div class="pixel"></div>
+            <div class="pixel"></div>
+            <div class="pixel"></div>
+          </div>
+
+          <div class="kv-grid">
+            <div class="kv-box">
+              <div class="kv-label">BLE Link State</div>
+              <div id="kvState" class="kv-val" style="color: var(--amber);">ADVERTISING</div>
+            </div>
+            <div class="kv-box">
+              <div class="kv-label">Connected Peer MAC</div>
+              <div id="kvPeer" class="kv-val">00:00:00:00:00:00</div>
+            </div>
+            <div class="kv-box">
+              <div class="kv-label">Connection Interval</div>
+              <div id="kvInterval" class="kv-val">— ms</div>
+            </div>
+            <div class="kv-box">
+              <div class="kv-label">Data Channel / MTU</div>
+              <div id="kvChannelMtu" class="kv-val">Ch 37 • MTU 23</div>
+            </div>
+            <div class="kv-box">
+              <div class="kv-label">MIDI Notes / Clocks Sent</div>
+              <div id="kvMidiCounts" class="kv-val" style="color: var(--green);">0 notes • 0 clk</div>
+            </div>
+            <div class="kv-box">
+              <div class="kv-label">Link-Layer RX / TX Pkts</div>
+              <div id="kvLlCounts" class="kv-val">0 rx • 0 tx</div>
+            </div>
+            <div class="kv-box">
+              <div class="kv-label">Adv Broadcasts / Scans</div>
+              <div id="kvAdvCounts" class="kv-val">0 adv • 0 scan</div>
+            </div>
+            <div class="kv-box">
+              <div class="kv-label">Last BLE-MIDI Packet Hex</div>
+              <div id="kvLastHex" class="kv-val" style="color: var(--accent);">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>
+            <span>3. Live Telemetry &amp; Event Log</span>
+            <button style="padding: 3px 9px; font-size: 0.75rem;" onclick="document.getElementById('logBox').innerHTML=''">Clear</button>
+          </h2>
+          <div id="logBox" class="log-box"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const BLE_MIDI_SERVICE_UUID = '03b80e5a-ede8-4b33-a751-6ce34ec4c700';
+    const BLE_MIDI_CHAR_UUID = '7772e5db-3868-4112-a1a9-f2669d106bf3';
+    const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const GM_DRUM_NAMES = {
+      35: 'Acoustic Bass Drum', 36: 'Bass Drum 1', 37: 'Side Stick / Rimshot',
+      38: 'Acoustic Snare', 42: 'Closed Hi-Hat', 44: 'Pedal Hi-Hat',
+      56: 'Cowbell', 75: 'Claves', 76: 'Hi Wood Block', 77: 'Lo Wood Block'
+    };
+
+    let serialPort = null;
+    let serialWriter = null;
+    let bleDevice = null;
+    let bleMidiChar = null;
+    let httpBridgeActive = false;
+    let isRunning = true;
+    let tapTimes = [];
+    let audioCtx = null;
+
+    function logMsg(msg, isEvent = false) {
+      const box = document.getElementById('logBox');
+      const div = document.createElement('div');
+      div.className = 'log-line' + (isEvent ? ' log-evt' : '');
+      const ts = new Date().toLocaleTimeString();
+      div.textContent = `[${ts}] ${msg}`;
+      box.appendChild(div);
+      if (box.childNodes.length > 150) box.removeChild(box.firstChild);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function midiNoteLabel(n) {
+      const num = parseInt(n) || 0;
+      const octave = Math.floor(num / 12) - 1;
+      const name = NOTE_NAMES[num % 12] + octave;
+      const drum = GM_DRUM_NAMES[num] ? ` / ${GM_DRUM_NAMES[num]}` : '';
+      return `${num} (${name}${drum})`;
+    }
+
+    function updateNoteLabels() {
+      document.getElementById('accentNoteName').textContent = midiNoteLabel(document.getElementById('accentNote').value);
+      document.getElementById('beatNoteName').textContent = midiNoteLabel(document.getElementById('beatNote').value);
+    }
+
+    function playBrowserClick(isDownbeat) {
+      if (!document.getElementById('chkBrowserAudio').checked) return;
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = isDownbeat ? 1320 : 880;
+      gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.035);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.04);
+    }
+
+    function animateBeat(beatIdx, meter) {
+      const pixels = document.querySelectorAll('#neopixelStrip .pixel');
+      pixels.forEach((p, idx) => {
+        p.className = 'pixel';
+        if (beatIdx === 1 && (idx === 0 || idx === 7)) {
+          p.classList.add('active-downbeat');
+        } else if (idx === ((beatIdx - 1) % 8)) {
+          p.classList.add('active-beat');
+        }
+      });
+      document.getElementById('beatCounterDisplay').textContent = `BEAT ${beatIdx} / ${meter}`;
+      playBrowserClick(beatIdx === 1);
+    }
+
+    // --- 1. Local HTTP Bridge Poll (when launched via tools/test_btmidi.py) ---
+    async function pollHttpBridge() {
+      if (window.location.protocol.startsWith('http')) {
+        try {
+          const res = await fetch('/api/status');
+          if (res.ok) {
+            const data = await res.json();
+            if (!httpBridgeActive) {
+              httpBridgeActive = true;
+              const b = document.getElementById('transportBadge');
+              b.textContent = `Transport: USB Bridge (${data.port || 'COM'})`;
+              b.className = 'badge sub';
+              logMsg(`Connected to local Python USB Serial bridge on ${data.port}`, true);
+            }
+            if (data.last_line) parseTelemetryLine(data.last_line, false);
+            if (data.events && data.events.length) {
+              data.events.forEach(e => logMsg(e, true));
+            }
+          }
+        } catch (_e) {}
+      }
+    }
+    setInterval(pollHttpBridge, 350);
+
+    // --- 2. Web Serial Connection (Direct from file:// or localhost in Chrome/Edge) ---
+    async function connectWebSerial() {
+      if (!('serial' in navigator)) {
+        alert('Web Serial API requires Chrome or Microsoft Edge.');
+        return;
+      }
+      try {
+        serialPort = await navigator.serial.requestPort();
+        await serialPort.open({ baudRate: 115200 });
+        await serialPort.setSignals({ dataTerminalReady: true, requestToSend: true });
+        serialWriter = serialPort.writable.getWriter();
+
+        const b = document.getElementById('transportBadge');
+        b.textContent = 'Transport: Web Serial (USB)';
+        b.className = 'badge sub';
+        logMsg('Web Serial port opened (115200 baud). Requesting STATUS...', true);
+        await sendSerialLine('STATUS');
+        readSerialLoop();
+      } catch (err) {
+        logMsg('Web Serial error: ' + err.message);
+      }
+    }
+
+    async function sendSerialLine(cmd) {
+      if (serialWriter) {
+        const data = new TextEncoder().encode(cmd + '\n');
+        await serialWriter.write(data);
+        logMsg('TX -> ' + cmd);
+      } else if (httpBridgeActive) {
+        await fetch('/api/cmd', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cmd })
+        });
+        logMsg('TX (Bridge) -> ' + cmd);
+      }
+    }
+
+    async function readSerialLoop() {
+      const decoder = new TextDecoder();
+      let buffer = '';
+      const reader = serialPort.readable.getReader();
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let lines = buffer.split(/\r?\n/);
+          buffer = lines.pop();
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed) parseTelemetryLine(trimmed, true);
+          }
+        }
+      } catch (err) {
+        logMsg('Serial read ended: ' + err.message);
+      }
+    }
+
+    // --- 3. Web Bluetooth Connection (Direct BLE-MIDI to XIAO) ---
+    async function connectWebBluetooth() {
+      if (!('bluetooth' in navigator)) {
+        alert('Web Bluetooth requires Chrome or Edge (on localhost or https).');
+        return;
+      }
+      try {
+        bleDevice = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [BLE_MIDI_SERVICE_UUID] }, { namePrefix: 'AI-METRO' }],
+          optionalServices: [BLE_MIDI_SERVICE_UUID]
+        });
+        logMsg(`Connecting via Web Bluetooth to ${bleDevice.name}...`, true);
+        const server = await bleDevice.gatt.connect();
+        const service = await server.getPrimaryService(BLE_MIDI_SERVICE_UUID);
+        bleMidiChar = await service.getCharacteristic(BLE_MIDI_CHAR_UUID);
+        await bleMidiChar.startNotifications();
+        bleMidiChar.addEventListener('characteristicvaluechanged', onBleMidiPacket);
+
+        const b = document.getElementById('transportBadge');
+        b.textContent = 'Transport: Web Bluetooth MIDI';
+        b.className = 'badge sub';
+        logMsg('Subscribed to BLE-MIDI I/O Characteristic (0x7772E5DB...)!', true);
+      } catch (err) {
+        logMsg('Web Bluetooth error: ' + err.message);
+      }
+    }
+
+    function onBleMidiPacket(event) {
+      const bytes = new Uint8Array(event.target.value.buffer);
+      const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+      document.getElementById('kvLastHex').textContent = hex;
+      if (bytes.length >= 5 && (bytes[2] & 0xF0) === 0x90 && bytes[4] > 0) {
+        const ch = (bytes[2] & 0x0F) + 1;
+        const note = bytes[3];
+        const vel = bytes[4];
+        const isDownbeat = note === parseInt(document.getElementById('accentNote').value);
+        animateBeat(isDownbeat ? 1 : 2, parseInt(document.getElementById('meterSelect').value));
+        logMsg(`BLE-MIDI RX NoteOn Ch=${ch} Note=${note} Vel=${vel} [${hex}]`, true);
+      }
+    }
+
+    // --- Send Parameter via USB Serial, HTTP Bridge, or BLE-MIDI SysEx ---
+    async function sendParam(serialKey, serialVal, sysexId, sysexVal14) {
+      await sendSerialLine(`SET ${serialKey}=${serialVal}`);
+      if (bleMidiChar) {
+        const hi7 = (sysexVal14 >> 7) & 0x7F;
+        const lo7 = sysexVal14 & 0x7F;
+        // BLE-MIDI wrapped SysEx: [Header 0x80, Timestamp 0x80, F0, 7D, 4D, 45, id, hi7, lo7, Timestamp 0x80, F7]
+        const pkt = new Uint8Array([0x80, 0x80, 0xF0, 0x7D, 0x4D, 0x45, sysexId, hi7, lo7, 0x80, 0xF7]);
+        try {
+          await bleMidiChar.writeValueWithoutResponse(pkt);
+        } catch (_e) {}
+      }
+    }
+
+    function onBpmInput(val) {
+      const v = parseFloat(val).toFixed(1);
+      document.getElementById('bpmLabel').textContent = `${v} BPM`;
+      document.getElementById('bpmSlider').value = val;
+      document.getElementById('bpmInput').value = v;
+    }
+
+    function nudgeBpm(delta) {
+      const next = Math.min(240, Math.max(30, parseFloat(document.getElementById('bpmSlider').value) + delta));
+      onBpmInput(next);
+      sendParam('BPM', next, 0x02, Math.round(next * 10));
+    }
+
+    function toggleRun() {
+      isRunning = !isRunning;
+      const btn = document.getElementById('btnRunToggle');
+      btn.textContent = isRunning ? '⏸ Pause Beat' : '▶ Resume Beat';
+      btn.className = isRunning ? 'success' : 'primary';
+      sendParam('RUN', isRunning ? 1 : 0, 0x01, isRunning ? 1 : 0);
+    }
+
+    function triggerSingleNote() {
+      sendSerialLine('TRIG');
+    }
+
+    function disconnectBlePeer() {
+      sendSerialLine('DISCONNECT');
+    }
+
+    function applyPreset(name) {
+      sendSerialLine(`PRESET ${name}`);
+      if (name === 'WIDI') {
+        document.getElementById('channelSelect').value = '10';
+        document.getElementById('accentNote').value = 76;
+        document.getElementById('accentVel').value = 120;
+        document.getElementById('beatNote').value = 77;
+        document.getElementById('beatVel').value = 85;
+        document.getElementById('chkSendNotes').checked = true;
+        document.getElementById('chkSendClock').checked = true;
+      } else if (name === 'PIANOTEQ') {
+        document.getElementById('channelSelect').value = '1';
+        document.getElementById('accentNote').value = 84;
+        document.getElementById('accentVel').value = 115;
+        document.getElementById('beatNote').value = 72;
+        document.getElementById('beatVel').value = 75;
+        document.getElementById('chkSendNotes').checked = true;
+        document.getElementById('chkSendClock').checked = true;
+      } else if (name === 'CLOCK') {
+        document.getElementById('chkSendNotes').checked = false;
+        document.getElementById('chkSendClock').checked = true;
+      }
+      updateNoteLabels();
+    }
+
+    function tapTempo() {
+      const now = performance.now();
+      tapTimes = tapTimes.filter(t => now - t < 3000);
+      tapTimes.push(now);
+      if (tapTimes.length >= 2) {
+        let sum = 0;
+        for (let i = 1; i < tapTimes.length; i++) sum += (tapTimes[i] - tapTimes[i - 1]);
+        const avgMs = sum / (tapTimes.length - 1);
+        const bpm = Math.min(240, Math.max(30, Math.round((60000 / avgMs) * 2) / 2));
+        onBpmInput(bpm);
+        sendParam('BPM', bpm, 0x02, Math.round(bpm * 10));
+      }
+    }
+
+    let lastBeatSeen = '';
+    function parseTelemetryLine(line, doLog) {
+      if (line.startsWith('[BTMIDI_EVT]') || line.startsWith('[BTMIDI_READY]')) {
+        logMsg(line, true);
+        return;
+      }
+      if (!line.startsWith('[BTMIDI]')) {
+        if (doLog) logMsg(line);
+        return;
+      }
+
+      const kv = {};
+      line.replace('[BTMIDI]', '').trim().split(/\s+/).forEach(tok => {
+        const idx = tok.indexOf('=');
+        if (idx > 0) kv[tok.slice(0, idx)] = tok.slice(idx + 1);
+      });
+
+      if (kv.STATE) {
+        const stEl = document.getElementById('kvState');
+        const badge = document.getElementById('bleStateBadge');
+        stEl.textContent = kv.STATE;
+        badge.textContent = `BLE: ${kv.STATE}`;
+        if (kv.STATE === 'SUBSCRIBED') {
+          stEl.style.color = 'var(--green)';
+          badge.className = 'badge sub';
+        } else if (kv.STATE === 'CONNECTED') {
+          stEl.style.color = 'var(--accent)';
+          badge.className = 'badge conn';
+        } else {
+          stEl.style.color = 'var(--amber)';
+          badge.className = 'badge adv';
+        }
+      }
+      if (kv.PEER) document.getElementById('kvPeer').textContent = kv.PEER;
+      if (kv.INT_MS) document.getElementById('kvInterval').textContent = `${kv.INT_MS} ms`;
+      if (kv.CH && kv.MTU) document.getElementById('kvChannelMtu').textContent = `Ch ${kv.CH} • MTU ${kv.MTU}`;
+      if (kv.MIDI_TX && kv.CLK_TX) document.getElementById('kvMidiCounts').textContent = `${kv.MIDI_TX} notes • ${kv.CLK_TX} clk`;
+      if (kv.RX && kv.TX) document.getElementById('kvLlCounts').textContent = `${kv.RX} rx • ${kv.TX} tx`;
+      if (kv.ADV && kv.SCAN) document.getElementById('kvAdvCounts').textContent = `${kv.ADV} adv • ${kv.SCAN} scan`;
+      if (kv.LAST_HEX) document.getElementById('kvLastHex').textContent = kv.LAST_HEX.match(/.{1,2}/g).join(' ');
+
+      if (kv.BEAT && kv.BEAT !== lastBeatSeen) {
+        lastBeatSeen = kv.BEAT;
+        const parts = kv.BEAT.split('/');
+        animateBeat(parseInt(parts[0]) || 1, parseInt(parts[1]) || 4);
+      }
+    }
+
+    updateNoteLabels();
+  </script>
+</body>
+</html>

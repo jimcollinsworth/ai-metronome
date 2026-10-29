@@ -3,6 +3,7 @@ name = "ai-metronome-rust"
 version = "2.6.0"
 edition = "2021"
 description = "AI Metronome v2.6 Rust Firmware for Seeed Studio XIAO nRF52840 Sense"
+autobins = false
 
 [lib]
 name = "ai_metronome_rust"

@@ -32,18 +32,36 @@ Active backlog and task tracking for `ai-metronome` (Embedded Rust Firmware on S
 
 ---
 
-## Active Sprint: Live BLE Sensor Logger Tracking & Piano Acoustic Isolation
+## Active Sprint: Stabilize Core Firmware, Serial Output Optimization & Wake Pattern Reset
 
 - [x] Port CJMCU-2812-8 (8x WS2812B NeoPixel stick on `D0` / `P0.02`) driver to Rust (`RgbLedController` 800 kHz WS2812B driver with startup sweep, 3x green ready blink, and all 4 mode choreographies)
-- [ ] Verify live `AI-METRO` BTHome v2 (`0xFCD2`) tempo tracking in Android **Sensor Logger**
+- [x] Put MIDI Bluetooth exploration (`ble_midi.rs`, `btmidi_test.rs`) ON HOLD to focus on core firmware stabilization
+- [x] Pare down monitor debug output (eliminate high-frequency beat spam; report only clean locks, tempo adjustments, mode switches, and gestures)
+- [x] Fix serial monitor responsiveness (guarantee USB CDC RX reads drain buffered keystrokes regardless of USB poll state)
+- [x] Implement clean wake-up reset: wipe tempo/phase/detector state on wake to listen fresh for a new acoustic pattern
+- [x] Add quick, low-brightness rainbow sweep across the 8 NeoPixels on boot and wake-up
+- [x] Audit embedded Rust codebase for unused code, dead variables, and memory overhead
+- [x] Fix PDM microphone continuous streaming (removed per-frame `tasks_stop` that caused 32-sample FIR filter restart transients, reducing span from 3,565 to 107 and noise floor from 320 to 35-58)
+- [x] Implement silence coasting timeout (`max_coast_beats = 8`) and fresh tempo onset on sound return after silence gap (>2.0s)
+- [x] Implement distinct Cyan radar listening indication on the 8 NeoPixels (`update_listening_bar`) to clearly show when the device is listening for metronome clicks
 
 ---
 
-## Open Architectural Questions (Next Phase)
+## Next Tasks & Backlog
 
-1. **Acoustic Isolation on Top of a Playing Piano**:
+- [ ] Shake-to-sleep and shake-to-wake gesture recognition (triple shake)
+- [ ] Time-limited BLE advertising on wake-up (minimal 1 Hz broadcast for 2–3 minutes after wake, then turn off radio for acoustic SNR)
+- [ ] Verify tempo lock accuracy across various tempos (60, 90, 120, 160 BPM) with Jim's acoustic metronome
+
+---
+
+## On-Hold / Future Backlog
+
+1. **BLE-MIDI / Web Bluetooth Dashboard**:
+   - On hold. Standalone proof-of-concept files (`ble_midi.rs`, `btmidi_test.rs`, `tools/btmidi_config.html`, `tools/test_btmidi.py`) preserved for future reference but excluded from active builds.
+2. **Acoustic Isolation on Top of a Playing Piano**:
    - Evaluate 2.5–5.5 kHz bandpass filtering and 7D onset fingerprinting (Spectral Flatness, autocorrelation Harmonicity, and 20–35 ms tail decay) in Rust to reject sustained piano string notes while locking onto dry mechanical escapement clicks.
-2. **Self-Sound Cancellation (Future Speaker Output)**:
+3. **Self-Sound Cancellation (Future Speaker Output)**:
    - Implement synchronous playback blanking gates when an onboard piezo/speaker is added.
-3. **On-Device Voice Command Control**:
+4. **On-Device Voice Command Control**:
    - Evaluate quantized `int8` keyword spotting (*"on beat"*, *"upbeat"*, *"four four"*, *"three four"*, *"sleep"*) on the shared 16 kHz PDM DMA stream.

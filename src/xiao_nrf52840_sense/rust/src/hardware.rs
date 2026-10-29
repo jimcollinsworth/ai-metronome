@@ -109,6 +109,9 @@ pub struct RgbLedController {
     pub off_deadline_sec: f64,
     pub active_color: LedColor,
     pub np_buf: [u8; 24],
+    pub listening_step_time_sec: f64,
+    pub listening_pos: u8,
+    pub listening_forward: bool,
 }
 
 impl RgbLedController {
@@ -124,6 +127,9 @@ impl RgbLedController {
             off_deadline_sec: 0.0,
             active_color: LedColor::Off,
             np_buf: [0u8; 24],
+            listening_step_time_sec: 0.0,
+            listening_pos: 0,
+            listening_forward: true,
         }
     }
 
@@ -342,28 +348,121 @@ impl RgbLedController {
         frame
     }
 
-    /// Startup hardware self-test sweep across all 8 pixels on `D0` (`P0.02`) + warm amber burst.
-    pub fn run_startup_pattern<F: FnMut()>(
+    /// Reset the listening radar animation state so it begins cleanly at pixel 0.
+    pub fn reset_listening_bar(&mut self) {
+        self.listening_pos = 0;
+        self.listening_forward = true;
+        self.listening_step_time_sec = 0.0;
+    }
+
+    /// Update the gentle Cyan/Teal radar listening scan across the 8 NeoPixels.
+    ///
+    /// Distinctive from all other LED modes:
+    /// - Beat modes: Stationary, short 35ms flashes of Red/Blue/Green/Amber on beats.
+    /// - Listening mode: A soft, dim Cyan (0, 140, 160) bead gracefully sweeping
+    ///   back and forth (0 -> 1 -> ... -> 7 -> 6 -> ... -> 0) at ~75ms per step.
+    /// - Extremely low power and unobtrusive (~3% effective brightness).
+    pub fn update_listening_bar(&mut self, p0: &p0::RegisterBlock, now_sec: f64) {
+        // Step every 75 ms (~13.3 Hz update rate)
+        if (now_sec - self.listening_step_time_sec) < 0.075 {
+            return;
+        }
+        self.listening_step_time_sec = now_sec;
+
+        // Advance position back and forth across 0..=7
+        if self.listening_forward {
+            if self.listening_pos >= (Self::NEOPIXEL_COUNT as u8 - 1) {
+                self.listening_forward = false;
+                self.listening_pos = self.listening_pos.saturating_sub(1);
+            } else {
+                self.listening_pos += 1;
+            }
+        } else {
+            if self.listening_pos == 0 {
+                self.listening_forward = true;
+                self.listening_pos = 1;
+            } else {
+                self.listening_pos -= 1;
+            }
+        }
+
+        let mut frame = [(0u8, 0u8, 0u8); 8];
+        let head = self.listening_pos as usize;
+        // Head pixel: Soft Cyan (0, 150, 175)
+        frame[head] = (0, 150, 175);
+
+        // Subtle soft tail on previous pixel
+        if self.listening_forward {
+            if head > 0 {
+                frame[head - 1] = (0, 35, 45);
+            }
+        } else {
+            if head + 1 < Self::NEOPIXEL_COUNT {
+                frame[head + 1] = (0, 35, 45);
+            }
+        }
+
+        // Render at subtle glow scale (~30% of base 11% brightness = ~3.3% total)
+        self.write_neopixel_frame(p0, &frame, 0.30);
+    }
+
+    /// Quick, low-brightness rainbow sweep across the 8 CJMCU-2812-8 NeoPixels.
+    /// Used for boot startup and clean wake-up re-initialization.
+    ///
+    /// "not bright, keep it down" (~40% of base 11% brightness = ~4.4% total glow).
+    pub fn run_rainbow_sweep<F: FnMut()>(
         &mut self,
         p0: &p0::RegisterBlock,
         timer: &mut MonotonicTimer,
         timer0: &TIMER0,
         mut poll_fn: F,
     ) {
-        for i in 0..Self::NEOPIXEL_COUNT {
+        // 8 soft rainbow spectral colors: Red, Orange, Amber, Green, Cyan, Blue, Purple, Magenta
+        const RAINBOW: [(u8, u8, u8); 8] = [
+            (180, 25, 25),  // 0: Soft Red
+            (180, 75, 0),   // 1: Warm Orange
+            (160, 140, 0),  // 2: Warm Amber/Yellow
+            (25, 180, 40),  // 3: Soft Green
+            (0, 150, 150),  // 4: Soft Cyan
+            (10, 80, 200),  // 5: Soft Blue
+            (110, 25, 190), // 6: Soft Purple
+            (170, 15, 110), // 7: Soft Magenta
+        ];
+
+        // Smooth comet sweep across pixels 0..7
+        for head in 0..Self::NEOPIXEL_COUNT {
             let mut frame = [(0u8, 0u8, 0u8); 8];
-            frame[i] = (0, 180, 255);
-            if i > 0 {
-                frame[i - 1] = (0, 40, 80);
+            frame[head] = RAINBOW[head];
+            if head > 0 {
+                let (pr, pg, pb) = RAINBOW[head - 1];
+                frame[head - 1] = (pr / 4, pg / 4, pb / 4);
             }
-            self.write_neopixel_frame(p0, &frame, 1.0);
-            timer.delay_ms_with_poll(timer0, 35, &mut poll_fn);
+            if head >= 2 {
+                let (ppr, ppg, ppb) = RAINBOW[head - 2];
+                frame[head - 2] = (ppr / 10, ppg / 10, ppb / 10);
+            }
+            self.write_neopixel_frame(p0, &frame, 0.40);
+            timer.delay_ms_with_poll(timer0, 18, &mut poll_fn);
         }
-        let amber = [(220u8, 140u8, 20u8); 8];
-        self.write_neopixel_frame(p0, &amber, 1.0);
-        timer.delay_ms_with_poll(timer0, 120, &mut poll_fn);
+
+        // Brief full rainbow shimmer across all 8 pixels
+        self.write_neopixel_frame(p0, &RAINBOW, 0.35);
+        timer.delay_ms_with_poll(timer0, 45, &mut poll_fn);
+
+        // Turn off cleanly
         self.clear_neopixels(p0);
-        timer.delay_ms_with_poll(timer0, 40, &mut poll_fn);
+        timer.delay_ms_with_poll(timer0, 20, &mut poll_fn);
+    }
+
+    /// Startup hardware self-test sweep across all 8 pixels on `D0` (`P0.02`) + warm amber burst.
+    pub fn run_startup_pattern<F: FnMut()>(
+        &mut self,
+        p0: &p0::RegisterBlock,
+        timer: &mut MonotonicTimer,
+        timer0: &TIMER0,
+        poll_fn: F,
+    ) {
+        self.run_rainbow_sweep(p0, timer, timer0, poll_fn);
     }
 
     #[inline]
@@ -448,6 +547,7 @@ impl RgbLedController {
     }
 
     /// Start a beat-synchronized flash across both the onboard RGB LED and the 8-pixel CJMCU-2812-8 stick.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_beat_flash(
         &mut self,
         p0: &p0::RegisterBlock,
@@ -549,6 +649,7 @@ impl RgbLedController {
     }
 
     /// 2 crisp Green blinks upon waking from sleep (`signal_wake`).
+    #[allow(dead_code)]
     pub fn signal_wake(&mut self, p0: &p0::RegisterBlock, timer: &mut MonotonicTimer, timer0: &TIMER0) {
         self.off(p0);
         let green_frame = [(0u8, 255u8, 40u8); 8];
@@ -853,14 +954,9 @@ impl PdmMicDriver {
             guard -= 1;
             if guard == 0 {
                 pdm.tasks_stop.write(|w| unsafe { w.bits(1) });
+                self.is_running = false;
                 return false;
             }
-        }
-
-        pdm.tasks_stop.write(|w| unsafe { w.bits(1) });
-        let mut stop_guard: u32 = 50_000;
-        while pdm.events_stopped.read().bits() == 0 && stop_guard > 0 {
-            stop_guard -= 1;
         }
         cortex_m::asm::dsb();
         true
@@ -1219,6 +1315,7 @@ impl BleRadioDriver {
 
     /// Broadcast the current tempo (`bpm`) across BLE advertising channels 37, 38, and 39.
     /// Total transmit time across all 3 channels with fast ramp-up is ~950 microseconds.
+    #[allow(dead_code)]
     pub fn broadcast_tempo(&mut self, radio: &RADIO, bpm: f32) {
         let (pdu, _len): ([u8; MAX_BLE_PDU_LEN], usize) = build_tempo_adv_pdu(self.mac, bpm);
 
