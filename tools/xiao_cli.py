@@ -572,9 +572,9 @@ def cmd_rust_deploy(args: argparse.Namespace) -> int:
 
 
 def trigger_self_test_replay(ser: serial.Serial) -> None:
-    """Send 'r' (or 0x04) to replay the full hardware self-test banner on the Rust firmware."""
+    """Send 't' to replay the full hardware self-test banner on the Rust firmware."""
     ser.reset_input_buffer()
-    ser.write(b"r")
+    ser.write(b"t")
     ser.flush()
 
 
@@ -615,7 +615,7 @@ def run_hil_test(com_port: str | None, listen_sec: float = 0.0, timeout_sec: flo
         with serial.Serial(com_port, baudrate=115200, timeout=0.1) as ser:
             ser.dtr = True
             ser.rts = True
-            print("[STEP 1/2] Requesting hardware self-test replay ('r')...")
+            print("[STEP 1/2] Requesting hardware self-test replay ('t')...")
             trigger_self_test_replay(ser)
 
             start_time = time.monotonic()

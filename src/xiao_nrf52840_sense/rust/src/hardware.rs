@@ -832,6 +832,7 @@ pub fn read_power_diagnostics(
 /// PDM Digital Microphone EasyDMA Driver (`P1.10` `MIC_PWR`, `P1.00` `PDM_CLK`, `P0.16` `PDM_DATA`).
 pub struct PdmMicDriver {
     pub is_running: bool,
+    pub gain_step: u8, // 0 = 0dB (default 0x28), 1 = +4.5dB, 2 = +9dB, 3 = +13.5dB, 4 = +18dB
 }
 
 impl PdmMicDriver {
@@ -840,7 +841,36 @@ impl PdmMicDriver {
     pub const PIN_PDM_DIN_P0: usize = 16; // P0.16
 
     pub const fn new() -> Self {
-        Self { is_running: false }
+        Self {
+            is_running: false,
+            gain_step: 1, // default to +4.5dB (0x31) for clear distant metronome pickup
+        }
+    }
+
+    /// Convert gain_step (0..=4) to register raw value and human-readable string.
+    pub fn gain_info(&self) -> (u8, &'static str) {
+        match self.gain_step {
+            0 => (0x28, "0.0 dB"),
+            1 => (0x31, "+4.5 dB"),
+            2 => (0x3A, "+9.0 dB"),
+            3 => (0x43, "+13.5 dB"),
+            _ => (0x4C, "+18.0 dB"),
+        }
+    }
+
+    /// Set hardware PDM digital gain across both left and right gain registers.
+    pub fn set_gain(&mut self, pdm: &PDM, step: u8) -> &'static str {
+        self.gain_step = step.min(4);
+        let (raw, name) = self.gain_info();
+        pdm.gainl.write(|w| unsafe { w.gainl().bits(raw) });
+        pdm.gainr.write(|w| unsafe { w.gainr().bits(raw) });
+        name
+    }
+
+    /// Cycle to the next hardware gain step (0 -> 1 -> 2 -> 3 -> 4 -> 0).
+    pub fn cycle_gain(&mut self, pdm: &PDM) -> &'static str {
+        let next = (self.gain_step + 1) % 5;
+        self.set_gain(pdm, next)
     }
 
     /// Enable `P1.10` (`MIC_PWR`) with High Drive (`H0H1`) and configure `NRF_PDM` at 16 kHz mono.
@@ -913,8 +943,9 @@ impl PdmMicDriver {
         // 1.032 MHz PDM clock / 64 = ~16.125 kHz PCM sample rate
         pdm.pdmclkctrl.write(|w| w.freq().default());
         pdm.mode.write(|w| w.operation().mono().edge().left_falling());
-        pdm.gainl.write(|w| w.gainl().default_gain());
-        pdm.gainr.write(|w| w.gainr().default_gain());
+        let (raw_gain, _) = self.gain_info();
+        pdm.gainl.write(|w| unsafe { w.gainl().bits(raw_gain) });
+        pdm.gainr.write(|w| unsafe { w.gainr().bits(raw_gain) });
 
         pdm.enable.write(|w| w.enable().enabled());
         self.is_running = true;

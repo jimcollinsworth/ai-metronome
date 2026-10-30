@@ -44,6 +44,11 @@ Active backlog and task tracking for `ai-metronome` (Embedded Rust Firmware on S
 - [x] Fix PDM microphone continuous streaming (removed per-frame `tasks_stop` that caused 32-sample FIR filter restart transients, reducing span from 3,565 to 107 and noise floor from 320 to 35-58)
 - [x] Implement silence coasting timeout (`max_coast_beats = 8`) and fresh tempo onset on sound return after silence gap (>2.0s)
 - [x] Implement distinct Cyan radar listening indication on the 8 NeoPixels (`update_listening_bar`) to clearly show when the device is listening for metronome clicks
+- [x] Enhance beat scanning telemetry visibility (1/3, 2/3 candidate beats, raw peak, crest factor, noise floor, and threshold in serial output)
+- [x] Extend coasting duration from 8 to 24 beats (~12.0s @ 120 BPM) with real-time bridge telemetry (`c` cycle key)
+- [x] Add configurable PDM hardware digital gain (`0dB`, `+4.5dB`, `+9dB`, `+13.5dB`, `+18dB`) via `g` cycle key for sensitive distant acoustic pickup
+- [x] Filter out accidental desk bumps while locked and require deliberate triple shake (`TripleShake`)
+- [x] Build standalone real-time Web Serial visualizer and diagnostics dashboard (`tools/metronome_live.html`)
 
 ---
 

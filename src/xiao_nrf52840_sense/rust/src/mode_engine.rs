@@ -133,7 +133,7 @@ impl MetronomeModeEngine {
             next_upbeat_time_sec: None,
             last_fired_beat_time_sec: -10.0,
             coasted_beats: 0,
-            max_coast_beats: 8,
+            max_coast_beats: 24,
             prev_dt_sec: None,
         }
     }
@@ -554,8 +554,10 @@ mod tests {
     }
 
     #[test]
-    fn test_silence_gap_and_coasting_timeout_resets_to_listening() {
+    fn test_silence_gap_and_extended_coasting_timeout_resets_to_listening() {
         let mut eng = MetronomeModeEngine::new();
+        assert_eq!(eng.max_coast_beats, 24);
+
         // 1. Lock at 120 BPM (0.50s period)
         let _ = eng.register_click(1.0);
         let _ = eng.register_click(1.5);
@@ -563,22 +565,24 @@ mod tests {
         assert!(ev.is_locked);
         assert!((eng.bpm() - 120.0).abs() < 1.0);
 
-        // 2. Coast for 8 beats (up to 6.0s)
-        for i in 1..=8 {
+        // 2. Coast for 24 beats (12.0 seconds of flywheeling)
+        for i in 1..=24 {
             let t = 2.0 + (i as f64) * 0.5 + 0.001;
-            assert!(eng.poll(t).is_some());
+            assert!(eng.poll(t).is_some(), "Beat {} should coast", i);
+            assert_eq!(eng.coasted_beats, i as u8);
         }
-        // Beat 9 exceeds max_coast_beats (8) -> cleanly resets to listening!
-        let t9 = 2.0 + 9.0 * 0.5 + 0.001;
-        assert_eq!(eng.poll(t9), None);
+
+        // Beat 25 exceeds max_coast_beats (24) -> cleanly resets to listening!
+        let t25 = 2.0 + 25.0 * 0.5 + 0.001;
+        assert_eq!(eng.poll(t25), None);
         assert!(!eng.is_locked);
         assert_eq!(eng.beat_period_sec, None);
 
         // 3. Silence gap of 5 seconds, then new metronome starts at 80 BPM (0.75s)
-        let _ = eng.register_click(12.0); // Beat 1
+        let _ = eng.register_click(20.0); // Beat 1
         assert!(!eng.is_locked);
-        let _ = eng.register_click(12.75); // Beat 2
-        let ev_locked = eng.register_click(13.50).unwrap(); // Beat 3
+        let _ = eng.register_click(20.75); // Beat 2
+        let ev_locked = eng.register_click(21.50).unwrap(); // Beat 3
         assert!(ev_locked.is_locked);
         assert!((eng.bpm() - 80.0).abs() < 1.5);
     }

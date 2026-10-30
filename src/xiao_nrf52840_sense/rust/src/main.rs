@@ -729,10 +729,19 @@ fn main() -> ! {
                     usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
                 } else if !flash.is_locked {
                     line.clear();
+                    let progress = if flash.bpm > 0.0 { "2/3 beats" } else { "1/3 beats" };
                     if flash.bpm > 0.0 {
-                        let _ = writeln!(line, "[CLICK] Tap detected ({:.1} BPM tentative)", flash.bpm);
+                        let _ = writeln!(
+                            line,
+                            "[SEARCH: {}] Tap detected @ {:.1} BPM (Peak: {}, Crest: {:.1}x, Floor: {:.0}, Thresh: {:.0})",
+                            progress, flash.bpm, click_ev.hp_peak, click_ev.crest_factor, click_detector.noise_floor_peak, click_ev.threshold
+                        );
                     } else {
-                        let _ = writeln!(line, "[CLICK] Tap detected");
+                        let _ = writeln!(
+                            line,
+                            "[SEARCH: {}] Initial tap detected (Peak: {}, Crest: {:.1}x, Floor: {:.0}, Thresh: {:.0})",
+                            progress, click_ev.hp_peak, click_ev.crest_factor, click_detector.noise_floor_peak, click_ev.threshold
+                        );
                     }
                     usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
                 }
@@ -771,6 +780,19 @@ fn main() -> ! {
             );
             // Blank refractory window so mic ignores any switching artifact during the flash
             click_detector.blank_refractory(now_pll_sec);
+
+            // Log coasting progress if flywheeling without acoustic clicks
+            if sched_flash.is_locked && mode_engine.coasted_beats > 0 && !sched_flash.is_upbeat {
+                line.clear();
+                let _ = writeln!(
+                    line,
+                    "[COASTING] Beat {}/{} flywheeling @ {:.1} BPM (Silence bridge)",
+                    mode_engine.coasted_beats,
+                    mode_engine.max_coast_beats,
+                    mode_engine.bpm()
+                );
+                usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+            }
         } else if was_locked_before_poll && !mode_engine.is_locked {
             // Coasting timed out -> cleanly returned to listening state!
             last_reported_bpm = 0.0;
@@ -778,10 +800,12 @@ fn main() -> ! {
             line.clear();
             let _ = writeln!(
                 line,
-                "[LISTENING] Silence -- listening for pattern (Mode: {}, Floor: {:.0}, Thresh: {:.0})",
+                "[SCANNING] Silence ({} beats coasted) -- listening for pattern (Mode: {}, Floor: {:.0}, Thresh: {:.0}, Gain: {})",
+                mode_engine.max_coast_beats,
                 mode_engine.mode.name(),
                 click_detector.noise_floor_peak,
-                click_detector.current_threshold()
+                click_detector.current_threshold(),
+                mic.gain_info().1
             );
             usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
         }
@@ -834,6 +858,31 @@ fn main() -> ! {
                     let _ = writeln!(line, "[KEY] Sleep mode requested");
                     usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
                     force_sleep = true;
+                }
+                b'g' | b'G' => {
+                    let gain_str = mic.cycle_gain(&dp.PDM);
+                    sleep_controller.notify_activity(now_sec);
+                    line.clear();
+                    let _ = writeln!(line, "[GAIN] Hardware PDM Gain set to: {}", gain_str);
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                }
+                b'c' | b'C' => {
+                    mode_engine.max_coast_beats = match mode_engine.max_coast_beats {
+                        8 => 16,
+                        16 => 24,
+                        24 => 48,
+                        48 => 96,
+                        _ => 8,
+                    };
+                    sleep_controller.notify_activity(now_sec);
+                    line.clear();
+                    let _ = writeln!(
+                        line,
+                        "[COAST] Max Coast Beats set to: {} (~{:.1}s @ 120 BPM)",
+                        mode_engine.max_coast_beats,
+                        (mode_engine.max_coast_beats as f32) * 0.5
+                    );
+                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
                 }
                 b'r' | b'R' => {
                     mode_engine.reset_pattern();
@@ -896,22 +945,25 @@ fn main() -> ! {
                     line.clear();
                     let _ = writeln!(
                         line,
-                        "  DSP  : Floor={:.1}, Thresh={:.0}, PrevQuiet={:.1}, Clicks={}",
+                        "  DSP  : Floor={:.1}, Thresh={:.0}, PrevQuiet={:.1}, Clicks={}, Gain={}",
                         click_detector.noise_floor_peak,
                         click_detector.current_threshold(),
                         click_detector.prev_quiet_peak,
-                        click_detector.click_count
+                        click_detector.click_count,
+                        mic.gain_info().1
                     );
                     usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
 
                     line.clear();
                     let _ = writeln!(
                         line,
-                        "  PLL  : Mode={}, Locked={}, BPM={:.1}, BeatIdx={}",
+                        "  PLL  : Mode={}, Locked={}, BPM={:.1}, BeatIdx={}, Coast={}/{}",
                         mode_engine.mode.name(),
                         mode_engine.is_locked,
                         mode_engine.bpm(),
-                        mode_engine.beat_index
+                        mode_engine.beat_index,
+                        mode_engine.coasted_beats,
+                        mode_engine.max_coast_beats
                     );
                     usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
 
@@ -966,20 +1018,28 @@ fn main() -> ! {
                 last_jerk_g = imu_res.jerk_g;
 
                 if let Some(gesture) = imu_res.gesture {
-                    let new_mode = mode_engine.cycle_mode();
                     sleep_controller.notify_activity(now_sec);
-
-                    line.clear();
-                    let _ = writeln!(
-                        line,
-                        "[GESTURE: {}] Mode -> {}: {}",
-                        gesture.as_str(),
-                        new_mode as u8,
-                        new_mode.name()
-                    );
-                    usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
-
-                    if !mode_engine.is_locked {
+                    if mode_engine.is_locked {
+                        // When locked to a tempo, ignore desk bumps/movements so we never drop out of lock!
+                        // Only deliberate TripleShake while UNLOCKED or explicit key command changes mode.
+                        line.clear();
+                        let _ = writeln!(
+                            line,
+                            "[GESTURE IGNORED] Locked @ {:.1} BPM (Mode preserved, desk bump filtered)",
+                            mode_engine.bpm()
+                        );
+                        usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
+                    } else {
+                        let new_mode = mode_engine.cycle_mode();
+                        line.clear();
+                        let _ = writeln!(
+                            line,
+                            "[GESTURE: {}] Mode -> {}: {}",
+                            gesture.as_str(),
+                            new_mode as u8,
+                            new_mode.name()
+                        );
+                        usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
                         led.start_flash(&dp.P0, new_mode.confirm_color(), 1.0, now_sec);
                     }
                 } else {

@@ -43,12 +43,12 @@ impl ClickDetector {
         Self {
             sample_rate_hz: 16_000,
             refractory_sec: 0.120,
-            min_peak_threshold: 95.0,
-            snr_ratio: 2.6,
-            min_crest_factor: 1.9,
-            attack_ratio: 1.45,
-            noise_floor_peak: 55.0,
-            prev_quiet_peak: 55.0,
+            min_peak_threshold: 65.0,
+            snr_ratio: 2.2,
+            min_crest_factor: 1.8,
+            attack_ratio: 1.35,
+            noise_floor_peak: 40.0,
+            prev_quiet_peak: 40.0,
             last_click_time_sec: -10.0,
             click_count: 0,
         }
@@ -58,8 +58,8 @@ impl ClickDetector {
     pub fn reset(&mut self) {
         self.click_count = 0;
         self.last_click_time_sec = -10.0;
-        self.noise_floor_peak = 55.0;
-        self.prev_quiet_peak = 55.0;
+        self.noise_floor_peak = 40.0;
+        self.prev_quiet_peak = 40.0;
     }
 
     /// Blank the detector for the refractory period (e.g. when firing an LED flash or waking up)
@@ -208,16 +208,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_calibration_resists_startup_click_outliers() {
+    fn test_sensitive_distant_click_detection_with_adapted_threshold() {
         let mut det = ClickDetector::new();
-        // 20 quiet frames around 60, plus 5 loud clicks at 2500
-        let mut peaks = [60i32; 25];
-        for p in peaks.iter_mut().skip(20) {
-            *p = 2500;
-        }
-        let floor = det.calibrate_from_peaks(&peaks);
-        assert!((floor - 60.0).abs() < 1e-3);
-        assert!(det.current_threshold() < 200.0);
+        // Quiet room with floor = 35
+        det.calibrate_from_peaks(&[35; 25]);
+        assert_eq!(det.noise_floor_peak, 35.0);
+        // Min threshold should allow quiet clicks: 35 * 2.2 = 77.0
+        assert!(det.current_threshold() <= 80.0);
+
+        // Distant metronome click producing hp_peak of 85 (above threshold, impulsive, sharp attack)
+        let mut distant_frame = [200i16; 80];
+        distant_frame[30] = 285; // +85 spike
+        distant_frame[31] = 200;
+
+        let ev = det.process_frame(&distant_frame, 2.000);
+        assert!(ev.is_click, "Distant metronome impulse of 85 should trigger click");
     }
 
     #[test]

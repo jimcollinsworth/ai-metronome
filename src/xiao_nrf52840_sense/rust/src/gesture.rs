@@ -4,14 +4,14 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureKind {
-    DoubleShake,
+    TripleShake,
     HardDrop,
 }
 
 impl GestureKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::DoubleShake => "DOUBLE_SHAKE",
+            Self::TripleShake => "TRIPLE_SHAKE",
             Self::HardDrop => "HARD_DROP",
         }
     }
@@ -50,13 +50,13 @@ impl Default for ShakeModeClassifier {
 impl ShakeModeClassifier {
     pub const fn new() -> Self {
         Self {
-            shake_threshold_g: 0.48,
-            shake_release_g: 0.20,
-            required_shakes: 2,
-            min_shake_gap_sec: 0.14,
-            max_shake_gap_sec: 0.95,
-            drop_dyn_threshold_g: 1.35,
-            drop_jerk_threshold_g: 1.45,
+            shake_threshold_g: 0.75,
+            shake_release_g: 0.30,
+            required_shakes: 3,
+            min_shake_gap_sec: 0.12,
+            max_shake_gap_sec: 1.10,
+            drop_dyn_threshold_g: 1.60,
+            drop_jerk_threshold_g: 1.80,
             cooldown_sec: 1.50,
             last_trigger_sec: -10.0,
             shake_count: 0,
@@ -141,7 +141,7 @@ impl ShakeModeClassifier {
                     self.shake_count = 0;
                     self.in_peak = false;
                     return ImuUpdateResult {
-                        gesture: Some(GestureKind::DoubleShake),
+                        gesture: Some(GestureKind::TripleShake),
                         dyn_g,
                         jerk_g,
                     };
@@ -235,26 +235,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_double_shake_and_hard_drop() {
+    fn test_triple_shake_and_hard_drop() {
         let mut clf = ShakeModeClassifier::new();
+        assert_eq!(clf.required_shakes, 3);
+        assert!((clf.shake_threshold_g - 0.75).abs() < 1e-4);
 
         // Rest at 1g
         assert_eq!(clf.update(0.0, 0.0, 1.0, 1.00).gesture, None);
 
-        // Shake 1 peak (1.65g -> dyn_g = 0.65g)
-        assert_eq!(clf.update(0.0, 0.0, 1.65, 1.20).gesture, None);
+        // Nudge (0.45g -> dyn_g = 0.45g) should NOT register as a shake peak
+        assert_eq!(clf.update(0.0, 0.0, 1.45, 1.10).gesture, None);
+        assert_eq!(clf.shake_count, 0);
+
+        // Shake 1 peak (1.80g -> dyn_g = 0.80g >= 0.75g)
+        assert_eq!(clf.update(0.0, 0.0, 1.80, 1.25).gesture, None);
+        assert_eq!(clf.shake_count, 1);
         // Release back to 1.0g
-        assert_eq!(clf.update(0.0, 0.0, 1.00, 1.35).gesture, None);
-        // Shake 2 peak (1.70g -> triggers DoubleShake)
+        assert_eq!(clf.update(0.0, 0.0, 1.00, 1.40).gesture, None);
+
+        // Shake 2 peak (1.85g)
+        assert_eq!(clf.update(0.0, 0.0, 1.85, 1.60).gesture, None);
+        assert_eq!(clf.shake_count, 2);
+        // Release
+        assert_eq!(clf.update(0.0, 0.0, 1.00, 1.75).gesture, None);
+
+        // Shake 3 peak (1.90g -> triggers TripleShake!)
         assert_eq!(
-            clf.update(0.0, 0.0, 1.70, 1.55).gesture,
-            Some(GestureKind::DoubleShake)
+            clf.update(0.0, 0.0, 1.90, 1.95).gesture,
+            Some(GestureKind::TripleShake)
         );
 
-        // Wait past 1.5s cooldown, then test HardDrop (2.5g impact)
-        assert_eq!(clf.update(0.0, 0.0, 1.00, 3.20).gesture, None);
+        // Wait past 1.5s cooldown, then test HardDrop (2.5g impact with high jerk)
+        assert_eq!(clf.update(0.0, 0.0, 1.00, 3.60).gesture, None);
         assert_eq!(
-            clf.update(0.0, 0.0, 2.50, 3.30).gesture,
+            clf.update(0.0, 0.0, 2.80, 3.70).gesture,
             Some(GestureKind::HardDrop)
         );
     }

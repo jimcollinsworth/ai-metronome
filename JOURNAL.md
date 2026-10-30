@@ -4,6 +4,37 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-30 — Scanning Telemetry Visibility, Configurable PDM Hardware Gain, Extended Coasting & Live Web Dashboard
+
+> [!NOTE] User Instructions & Guidance:
+> - *"lets improve the visibility of the beat scanning mode, data and parameters. show more in monitor mode - especially around the searching process, gain and other settings. then on the web page it should show that info/mode in real time too. we need this because i want to improve the reliability of hearing the metromone from both inside and outside, filtering out other sounds, responding/not responding to shakes. currently seems like it locks in but then looses quickly and with any movement at all. not really coasting long. /nrf52840-mcu /xiao-nrf52840-sense /test-driven-development"*
+
+### ADR 021: Configurable PDM Hardware Gain, Extended Coasting (24 beats), Triple-Shake Filtering & Real-Time Live Web Visualizer
+- **Context**:
+  1. The metronome was dropping out of tempo lock quickly because `max_coast_beats` was set to 8 (which is only 3–4 seconds at 120–160 BPM).
+  2. The device frequently dropped lock on physical vibrations or desk movement because `ShakeModeClassifier` had a low threshold (0.48g) and only required 2 shakes.
+  3. Distant metronomes ("outside") were difficult to hear because PDM hardware digital gain was locked at 0 dB, and minimum peak thresholds were clamped at 95.0 counts.
+  4. Terminal and monitor visibility into the candidate beat acquisition process (1/3, 2/3 beats, raw peak, crest factor, and noise floor) was minimal.
+- **Decision**:
+  1. **Extended Coasting (TDD)**:
+     - Extended default `max_coast_beats` from 8 to 24 beats (~12.0s @ 120 BPM) and added cycle command `c` / `C` (8 -> 16 -> 24 -> 48 -> 96).
+     - Added real-time serial telemetry: `[COASTING] Beat X/24 flywheeling @ Y.Y BPM (Silence bridge)`.
+  2. **Triple-Shake & Lock Motion Shielding (TDD)**:
+     - Replaced 2-shake trigger with `TripleShake` requiring 3 distinct peaks and raised threshold to 0.75g (jerk to 1.80g).
+     - While the metronome is **Locked**, accidental desk bumps and movements are completely ignored to protect tempo continuity (`[GESTURE IGNORED]`).
+  3. **Runtime PDM Digital Gain**:
+     - Added PDM hardware gain control (`+0 dB`, `+4.5 dB`, `+9 dB`, `+13.5 dB`, `+18 dB`) via keystroke `g` / `G` and Web Serial. Default set to `+4.5 dB` for increased pickup sensitivity across rooms.
+     - Lowered baseline threshold from 95.0 to 65.0 with adaptive 2.2x SNR ratio.
+  4. **Detailed Scanning Telemetry**:
+     - Serial stream now reports progressive tap acquisition: `[SEARCH: 1/3 beats]` and `[SEARCH: 2/3 beats]` with peak, crest factor, noise floor, and threshold.
+  5. **Real-Time Web Dashboard (`tools/metronome_live.html`)**:
+     - Built a standalone Web Serial HTML5 dashboard with live oscilloscope, threshold line, NeoPixel visualizer bar, coasting progress bar, and instant command triggers.
+- **Verification**:
+  - All 15 host unit tests passed via strict TDD (`cargo test`).
+  - Compiled release firmware and verified on physical hardware (`COM10`): HIL test passed all 7/7 checkpoints in 1.12s. Verified on-device click detection, coasting, and hardware gain cycling.
+
+---
+
 ## 2026-10-29 — PDM Continuous Streaming Fix, Silence Coasting Timeout, Clean Reset & Cyan Radar Listening Bar
 
 > [!NOTE] User Instructions & Guidance:
