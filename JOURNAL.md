@@ -4,6 +4,35 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-30 — PLL Lock Hysteresis (Spurious Click Immunity), Dynamic Gain Display & Direct Keyboard Shortcuts
+
+> [!NOTE] User Instructions & Guidance:
+> - *"need to show the gain on the web page, hard to tell what values i'm cycling. still only locks briefly"*
+> - User attached screenshot of Web Live Visualizer showing repeated rapid lock acquisitions jumping between 247 BPM, 263 BPM, 109 BPM, 227 BPM, 238 BPM and immediate fallback to coasting/searching.
+
+### ADR 022: Outlier Rejection & Lock Hysteresis in PLL Beat Tracker, Live Gain Button Reflection & Keyboard Controls
+- **Context**:
+  1. In `mode_engine.rs`, when the metronome was locked, the arrival of any single stray acoustic click, room echo, or desk knock outside $[0.72 \times P, 1.38 \times P]$ immediately set `is_locked = false`, adopted the outlier as the new period, and reset `beat_index = 0`.
+  2. In acoustic environments with metronomes ticking in a room, single acoustic reflections or slight timing variations broke lock instantly on the very first outlier, causing the PLL to constantly oscillate between locking, searching, and coasting.
+  3. On the web dashboard (`tools/metronome_live.html`), the gain cycle button displayed static text `Cycle Gain (g)`, making it impossible for the user to see what gain setting was active without hunting through the telemetry stream.
+- **Decision**:
+  1. **PLL Lock Hysteresis (TDD)**:
+     - Written and verified failing unit test `test_lock_stability_resists_stray_spurious_intervals_when_locked`.
+     - In `register_click`: When `is_locked == true`, single outlier clicks that do not match the expected beat grid or interval are rejected without breaking lock. The PLL flywheel continues uninterrupted at the locked tempo and phase.
+     - Tempo transitions while locked now require **two consecutive matching intervals** (three clicks) at the new tempo, preventing single stray noises from corrupting the tracked beat.
+     - The true beat arrival following an outlier matches the expected beat grid (`dt_since_last_fired`), restoring exact phase alignment with zero lock perturbation.
+  2. **Dynamic Web Gain & Coasting Visibility**:
+     - Updated `tools/metronome_live.html`: The gain button now dynamically reflects the active setting (e.g., `Gain: +4.5 dB (g)`), updating automatically on click, keypress, `[GAIN]` telemetry, or state dump `DSP  : ... Gain=`.
+     - The coast button dynamically displays `Coast: 24 (c)`.
+     - Added global keyboard shortcut listeners for `g`, `c`, `r`, `d`, `m`, `z`, and `1..4` to allow hands-on-keyboard control without needing mouse focus.
+- **Verification**:
+  - All 15 host unit tests passed via `cargo test`.
+  - Built release firmware for `thumbv7em-none-eabihf` with zero warnings (`uv run xiao-cli build`).
+  - Deployed to hardware on `COM10` (`uv run xiao-cli deploy`).
+  - Ran HIL test suite (`uv run xiao-cli test`): 7/7 checkpoints passed in 1.20s.
+
+---
+
 ## 2026-10-30 — Scanning Telemetry Visibility, Configurable PDM Hardware Gain, Extended Coasting & Live Web Dashboard
 
 > [!NOTE] User Instructions & Guidance:

@@ -48,6 +48,8 @@ Active backlog and task tracking for `ai-metronome` (Embedded Rust Firmware on S
 - [x] Extend coasting duration from 8 to 24 beats (~12.0s @ 120 BPM) with real-time bridge telemetry (`c` cycle key)
 - [x] Add configurable PDM hardware digital gain (`0dB`, `+4.5dB`, `+9dB`, `+13.5dB`, `+18dB`) via `g` cycle key for sensitive distant acoustic pickup
 - [x] Filter out accidental desk bumps while locked and require deliberate triple shake (`TripleShake`)
+- [x] Fix PLL lock fragility: implement lock hysteresis against single stray acoustic outliers / echoes (prevents tempo hopping, requires two consecutive intervals to transition tempo while locked)
+- [x] Update live web dashboard (`tools/metronome_live.html`) with dynamic gain button label (`Gain: +X.X dB (g)`), coast button (`Coast: X (c)`), and direct keyboard control shortcuts
 - [x] Build standalone real-time Web Serial visualizer and diagnostics dashboard (`tools/metronome_live.html`)
 
 ---

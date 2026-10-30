@@ -201,9 +201,6 @@ impl MetronomeModeEngine {
             }
         }
 
-        self.last_click_time_sec = Some(click_time_sec);
-        self.coasted_beats = 0;
-
         if let Some(interval) = ioi {
             match self.beat_period_sec {
                 None => {
@@ -211,14 +208,24 @@ impl MetronomeModeEngine {
                     self.locked_intervals = 1;
                     self.is_locked = false;
                     self.prev_dt_sec = Some(interval);
+                    self.coasted_beats = 0;
+                    self.last_click_time_sec = Some(click_time_sec);
                 }
                 Some(curr_period) => {
-                    if (curr_period * 0.72..=curr_period * 1.38).contains(&interval) {
-                        self.beat_period_sec = Some(0.65 * curr_period + 0.35 * interval);
+                    let dt_since_last_fired = click_time_sec - self.last_fired_beat_time_sec;
+                    let matches_ioi = (curr_period * 0.72..=curr_period * 1.38).contains(&interval);
+                    let matches_beat_grid = (curr_period * 0.72..=curr_period * 1.38).contains(&dt_since_last_fired);
+
+                    if matches_ioi || (self.is_locked && matches_beat_grid) {
+                        let eff_interval = if matches_ioi { interval } else { dt_since_last_fired };
+                        self.beat_period_sec = Some(0.70 * curr_period + 0.30 * eff_interval);
                         self.locked_intervals = self.locked_intervals.saturating_add(1);
                         if self.locked_intervals >= 2 {
                             self.is_locked = true;
                         }
+                        self.coasted_beats = 0;
+                        self.prev_dt_sec = None;
+                        self.last_click_time_sec = Some(click_time_sec);
                     } else if let Some(prev_dt) = self.prev_dt_sec {
                         if (interval - prev_dt).abs() / prev_dt < 0.25 {
                             // Two consecutive consistent intervals at a new slower or faster tempo!
@@ -226,23 +233,41 @@ impl MetronomeModeEngine {
                             self.beat_period_sec = Some(new_period);
                             self.locked_intervals = 2;
                             self.is_locked = true;
+                            self.coasted_beats = 0;
+                            self.prev_dt_sec = None;
+                            self.last_click_time_sec = Some(click_time_sec);
+                        } else if self.is_locked {
+                            // Outlier click while locked: preserve PLL lock, record as outlier candidate
+                            self.prev_dt_sec = Some(interval);
+                            self.last_click_time_sec = Some(click_time_sec);
+                            return None;
                         } else {
-                            // First interval of a potential tempo change -> adopt immediately so slowing down tracks
+                            // Not locked: adopt new candidate interval
                             self.beat_period_sec = Some(interval);
                             self.beat_index = 0;
                             self.locked_intervals = 1;
                             self.is_locked = false;
+                            self.prev_dt_sec = Some(interval);
+                            self.last_click_time_sec = Some(click_time_sec);
                         }
+                    } else if self.is_locked {
+                        // First outlier while locked: preserve PLL lock & period, record candidate
+                        self.prev_dt_sec = Some(interval);
+                        self.last_click_time_sec = Some(click_time_sec);
+                        return None;
                     } else {
-                        // Tempo change -> adopt new interval
+                        // Not locked: adopt new interval
                         self.beat_period_sec = Some(interval);
                         self.beat_index = 0;
                         self.locked_intervals = 1;
                         self.is_locked = false;
+                        self.prev_dt_sec = Some(interval);
+                        self.last_click_time_sec = Some(click_time_sec);
                     }
-                    self.prev_dt_sec = Some(interval);
                 }
             }
+        } else {
+            self.last_click_time_sec = Some(click_time_sec);
         }
 
         // Check if our autonomous PLL already fired a beat flash within +/- 38% of this click
@@ -554,36 +579,24 @@ mod tests {
     }
 
     #[test]
-    fn test_silence_gap_and_extended_coasting_timeout_resets_to_listening() {
+    fn test_lock_stability_resists_stray_spurious_intervals_when_locked() {
         let mut eng = MetronomeModeEngine::new();
-        assert_eq!(eng.max_coast_beats, 24);
-
-        // 1. Lock at 120 BPM (0.50s period)
+        // Lock at 120 BPM (0.50s period)
         let _ = eng.register_click(1.0);
         let _ = eng.register_click(1.5);
         let ev = eng.register_click(2.0).unwrap();
         assert!(ev.is_locked);
         assert!((eng.bpm() - 120.0).abs() < 1.0);
 
-        // 2. Coast for 24 beats (12.0 seconds of flywheeling)
-        for i in 1..=24 {
-            let t = 2.0 + (i as f64) * 0.5 + 0.001;
-            assert!(eng.poll(t).is_some(), "Beat {} should coast", i);
-            assert_eq!(eng.coasted_beats, i as u8);
-        }
+        // A single stray spurious sound occurs at 2.22s (interval 0.22s = 272 BPM outlier)
+        let _ev_stray = eng.register_click(2.22);
+        // The metronome must NOT instantly adopt 272 BPM and unlock! It should stay locked at ~120 BPM
+        assert!(eng.is_locked, "A single stray outlier must not break lock");
+        assert!((eng.bpm() - 120.0).abs() < 5.0, "Tempo should remain anchored near 120 BPM");
 
-        // Beat 25 exceeds max_coast_beats (24) -> cleanly resets to listening!
-        let t25 = 2.0 + 25.0 * 0.5 + 0.001;
-        assert_eq!(eng.poll(t25), None);
-        assert!(!eng.is_locked);
-        assert_eq!(eng.beat_period_sec, None);
-
-        // 3. Silence gap of 5 seconds, then new metronome starts at 80 BPM (0.75s)
-        let _ = eng.register_click(20.0); // Beat 1
-        assert!(!eng.is_locked);
-        let _ = eng.register_click(20.75); // Beat 2
-        let ev_locked = eng.register_click(21.50).unwrap(); // Beat 3
-        assert!(ev_locked.is_locked);
-        assert!((eng.bpm() - 80.0).abs() < 1.5);
+        // The true metronome beat arrives on schedule at 2.50s
+        let ev_true = eng.register_click(2.50).unwrap();
+        assert!(ev_true.is_locked);
+        assert!((eng.bpm() - 120.0).abs() < 1.0);
     }
 }

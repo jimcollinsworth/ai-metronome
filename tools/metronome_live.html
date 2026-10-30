@@ -202,8 +202,8 @@
       <div class="conn-bar">
         <button id="btnConnect" class="primary">Connect Serial (USB)</button>
         <button id="btnReset" style="background:#4c1d95; border-color:#8b5cf6;">Reset / Scan (r)</button>
-        <button id="btnGain">Cycle Gain (g)</button>
-        <button id="btnCoast">Cycle Coast (c)</button>
+        <button id="btnGain">Gain: +4.5 dB (g)</button>
+        <button id="btnCoast">Coast: 24 (c)</button>
         <button id="btnDump">State Dump (d)</button>
         <button id="btnClear">Clear Log</button>
       </div>
@@ -283,6 +283,11 @@
     let inputBuffer = "";
 
     const btnConnect = document.getElementById("btnConnect");
+    const btnReset = document.getElementById("btnReset");
+    const btnGain = document.getElementById("btnGain");
+    const btnCoast = document.getElementById("btnCoast");
+    const btnDump = document.getElementById("btnDump");
+    const btnClear = document.getElementById("btnClear");
     const connState = document.getElementById("connState");
     const termOutput = document.getElementById("termOutput");
     const valBpm = document.getElementById("valBpm");
@@ -296,6 +301,15 @@
     const barCoast = document.getElementById("barCoast");
     const statusIndicator = document.getElementById("statusIndicator");
     const npPixels = document.querySelectorAll(".pixel");
+
+    function setGainDisplay(gainText) {
+      valGain.textContent = `Gain: ${gainText}`;
+      btnGain.textContent = `Gain: ${gainText} (g)`;
+    }
+
+    function setCoastDisplay(maxCoast) {
+      btnCoast.textContent = `Coast: ${maxCoast} (c)`;
+    }
 
     // Scope canvas
     const canvas = document.getElementById("scopeCanvas");
@@ -356,7 +370,27 @@
         parseScanning(text);
       } else if (text.includes("[GAIN]")) {
         el.className = "line-info";
-        valGain.textContent = text.split("set to:")[1]?.trim() || "";
+        const g = text.split("set to:")[1]?.trim();
+        if (g) setGainDisplay(g);
+      } else if (text.includes("[COAST]")) {
+        el.className = "line-info";
+        const m = text.match(/Max Coast Beats set to: (\d+)/);
+        if (m) {
+          setCoastDisplay(m[1]);
+          valCoast.textContent = `Coast: 0/${m[1]}`;
+        }
+      } else if (text.includes("[TEMPO]")) {
+        el.className = "line-info";
+        const m = text.match(/\[TEMPO\] ([\d\.]+) BPM/);
+        if (m) valBpm.textContent = m[1];
+      } else if (text.includes("DSP  :")) {
+        el.className = "line-info";
+        const mGain = text.match(/Gain=([^,\s]+(?:\s*dB)?)/);
+        if (mGain) setGainDisplay(mGain[1]);
+        const mFloor = text.match(/Floor=([\d\.]+)/);
+        if (mFloor) valFloor.textContent = mFloor[1];
+        const mThresh = text.match(/Thresh=([\d\.]+)/);
+        if (mThresh) valThresh.textContent = mThresh[1];
       } else {
         el.className = "line-info";
       }
@@ -508,11 +542,19 @@
       }
     }
 
-    document.getElementById("btnReset").addEventListener("click", () => sendKey("r"));
-    document.getElementById("btnGain").addEventListener("click", () => sendKey("g"));
-    document.getElementById("btnCoast").addEventListener("click", () => sendKey("c"));
-    document.getElementById("btnDump").addEventListener("click", () => sendKey("d"));
-    document.getElementById("btnClear").addEventListener("click", () => { termOutput.innerHTML = ""; });
+    btnReset.addEventListener("click", () => sendKey("r"));
+    btnGain.addEventListener("click", () => sendKey("g"));
+    btnCoast.addEventListener("click", () => sendKey("c"));
+    btnDump.addEventListener("click", () => sendKey("d"));
+    btnClear.addEventListener("click", () => { termOutput.innerHTML = ""; });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+      const key = e.key.toLowerCase();
+      if (["r", "g", "c", "d", "m", "z", "1", "2", "3", "4", "t"].includes(key)) {
+        sendKey(key);
+      }
+    });
   </script>
 </body>
 </html>
