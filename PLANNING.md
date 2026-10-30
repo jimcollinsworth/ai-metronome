@@ -57,6 +57,7 @@ Active backlog and task tracking for `ai-metronome` (Embedded Rust Firmware on S
 
 ## Next Tasks & Backlog
 
+- [ ] Reassess Real-Time OS (RTOS) architecture for firmware development: evaluate **Embassy** (async Rust) vs. **Zephyr RTOS** vs. bare-metal polling for task concurrency, PDM DMA ring-buffering, low-power WFI scheduling, and TinyML expansion
 - [ ] Shake-to-sleep and shake-to-wake gesture recognition (triple shake)
 - [ ] Time-limited BLE advertising on wake-up (minimal 1 Hz broadcast for 2–3 minutes after wake, then turn off radio for acoustic SNR)
 - [ ] Verify tempo lock accuracy across various tempos (60, 90, 120, 160 BPM) with Jim's acoustic metronome

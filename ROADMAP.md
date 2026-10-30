@@ -27,6 +27,23 @@ To reliably lock onto the mechanical escapement click while ignoring musical per
 - **Stage 1 — CircuitPython POC**: Rapid prototyping of hardware initialization, PDM microphone health checks, adaptive high-pass click detection, and visual LED beat synchronization (`src/xiao_nrf52840_sense/circuitpython/code.py`).
 - **Stage 2 — C++ Firmware**: Porting the audio DMA capture, PLL beat clock, and onset detection pipeline to C++ for deterministic hardware timer interrupts and zero-gap double-buffered PDM DMA (`src/xiao_nrf52840_sense/cpp/`).
 - **Stage 3 — Rust Firmware**: Evaluating an embedded Rust (`embassy-nrf` / `nrf52840-hal`) implementation for memory-safe, zero-cost async audio DSP and BLE telemetry (`src/xiao_nrf52840_sense/rust/`).
+
+### RTOS Architectural Reassessment: Embassy vs. Zephyr vs. Bare-Metal Polling
+- **Motivation**: Currently, `ai-metronome-rust` uses a single-threaded cooperative polling architecture (`main.rs` 200 Hz loop with manual USB/DMA polling closures). As features grow to include concurrent voice keyword spotting (TinyML), multi-sensor gesture classification, BLE advertising scheduling, and NeoPixel animations, manual polling requires careful coordination. An RTOS or async runtime could decouple tasks, simplify PDM DMA ping-pong streaming, and streamline power-saving sleep.
+- **Evaluation Options**:
+  1. **Embassy (`embassy-nrf`, async Rust)**:
+     - Pure Rust async/await cooperative executor with zero heap allocation.
+     - Native nRF52840 async drivers for PDM (automatic DMA double-buffering without CPU spin-polling), TWIM (async I2C), PWM (`embassy-nrf::pwm`), USB CDC (`embassy-usb`), and SoftDevice/nrf-softdevice BLE.
+     - Preserves 100% of our pure Rust core modules (`click_detector.rs`, `mode_engine.rs`, `gesture.rs`, `ble_advertiser.rs`).
+     - Automatic low-power `WFE`/`WFI` sleep whenever async tasks are idle.
+  2. **Zephyr RTOS (C/C++ or Rust on Zephyr)**:
+     - Industry-standard embedded RTOS backed by Nordic Semiconductor (nRF Connect SDK).
+     - Preemptive priority multithreading, rich driver ecosystem (PDM, TWIM, Bluetooth LE Host/Controller stack), and built-in power management.
+     - Tradeoffs: C toolchain complexity (`west`, CMake, DeviceTree overlays), larger flash/RAM footprint, and FFI bridging to our Rust core algorithms.
+  3. **Current Bare-Metal Polling Loop (PAC / HAL)**:
+     - Minimal dependency footprint, sub-microsecond determinism, zero RTOS scheduler overhead.
+     - Tradeoffs: Manual polling closures required during DMA transfers to maintain low USB CDC latency.
+- **Next Step**: Benchmark an Embassy async prototype against the current bare-metal loop to evaluate CPU idle utilization, audio DMA double-buffering ergonomics, and development speed.
 - **Stage 4 — Optimized Native Code with Multi-Cluster Timbre/Harmonicity Rhythm Locking, Instrument Rejection & Custom-Phrase Voice Input (TFLite Micro / TinyML)**:
   - **Multi-Stream Rhythm Locking via Timbre, Harmonicity & Spectral Flatness**:
     - Extract a 7D acoustic fingerprint per candidate onset (`128-sample` onset window + `20–35 ms` tail):

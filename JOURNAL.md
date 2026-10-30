@@ -4,6 +4,23 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-30 — Backlog Addition: RTOS Architecture Reassessment (Embassy vs. Zephyr vs. Bare-Metal)
+
+> [!NOTE] User Instructions & Guidance:
+> - *"add a new task to backlog, reasses the use real time OS, there are a couple available and maybe that would help our task development, embassy, zepher..."*
+
+### Architectural Proposal: Real-Time OS & Async Runtime Reassessment for Firmware Scalability
+- **Motivation**:
+  - The current Rust firmware uses a single-threaded cooperative polling architecture (`main.rs` 200 Hz main loop with polling closures passed to DMA and delay functions to service USB CDC).
+  - While this design is lightweight, deterministic, and free of RTOS overhead, coordinating concurrent asynchronous activities—continuous PDM audio DMA, LSM6DS3 I2C polling, USB serial commands, NeoPixel PWM latching, BLE broadcasting, and future TinyML keyword spotting—requires manual interleaving.
+- **Backlog Item Added**:
+  - Added to [`PLANNING.md`](file:///c:/Users/jimco/Projects/ai-metronome/PLANNING.md) and [`ROADMAP.md`](file:///c:/Users/jimco/Projects/ai-metronome/ROADMAP.md): Reassess RTOS runtime options:
+    1. **Embassy (`embassy-nrf`, async Rust)**: Zero-cost async executor, native nRF52840 async drivers (PDM ping-pong DMA, TWIM, PWM, USB, BLE), 100% preservation of our Rust core modules (`click_detector`, `mode_engine`, `gesture`), and automatic `WFI` low-power sleep.
+    2. **Zephyr RTOS (C/C++ or Rust on Zephyr)**: Preemptive multi-threading, Nordic NCS ecosystem, rich driver and BLE stack support, evaluated against toolchain complexity (`west`/CMake) and FFI overhead.
+    3. **Bare-Metal Polling (Current PAC/HAL)**: Maintained as the baseline reference for sub-microsecond determinism and minimal binary footprint.
+
+---
+
 ## 2026-10-30 — NeoPixel Stuck Beat 1 / Reset Freeze Fix & Detector SNR Threshold Calibration
 
 > [!NOTE] User Instructions & Guidance:
