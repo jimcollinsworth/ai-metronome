@@ -4,6 +4,28 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-30 — Backlog Addition: Embedded Rust Development Skill & Reference Architecture Setup
+
+> [!NOTE] User Instructions & Guidance:
+> - *"other backlog todo - get rust and embedded development skills setup, find examples of professional well crafted rust code."*
+
+### Architectural Proposal: Embedded Rust Skill Setup & Exemplary Production References
+- **Context**:
+  - The project has transitioned from Python prototyping to production ARM Cortex-M4F `#![no_std]` embedded Rust.
+  - To accelerate future feature development (Embassy async evaluation, BLE services, sensor streaming, and TinyML DSP), standard engineering principles, safety rules, and canonical code examples needed to be centralized into an Agent Skill.
+- **Actions Taken**:
+  1. **New Agent Skill Created**:
+     - Authored [`.agents/skills/embedded-rust/SKILL.md`](file:///c:/Users/jimco/Projects/ai-metronome/.agents/skills/embedded-rust/SKILL.md) covering zero-allocation real-time safety, EasyDMA memory barriers (`compiler_fence`), `flip-link` stack overflow protection, and Embassy async task concurrency patterns.
+  2. **Curated Canonical GitHub References**:
+     - `embassy-rs/embassy`: Native async drivers for nRF52840 (PDM, USB, PWM, TWIM).
+     - `embassy-rs/trouble`: Modern, pure-Rust BLE 5.0 Host/Controller stack without vendor blobs.
+     - `knurling-rs` (Ferrous Systems): `defmt`, `probe-rs`, and `flip-link` production workflows.
+     - `tock/tock`: Capability-based secure microkernel architecture in Rust.
+  3. **Backlog Tracking**:
+     - Updated [`PLANNING.md`](file:///c:/Users/jimco/Projects/ai-metronome/PLANNING.md) with ongoing tasks for reference pattern evaluation.
+
+---
+
 ## 2026-10-30 — Backlog Addition: RTOS Architecture Reassessment (Embassy vs. Zephyr vs. Bare-Metal)
 
 > [!NOTE] User Instructions & Guidance:
