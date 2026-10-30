@@ -43,10 +43,10 @@ impl ClickDetector {
         Self {
             sample_rate_hz: 16_000,
             refractory_sec: 0.120,
-            min_peak_threshold: 65.0,
+            min_peak_threshold: 75.0,
             snr_ratio: 2.2,
-            min_crest_factor: 1.8,
-            attack_ratio: 1.35,
+            min_crest_factor: 1.9,
+            attack_ratio: 1.40,
             noise_floor_peak: 40.0,
             prev_quiet_peak: 40.0,
             last_click_time_sec: -10.0,

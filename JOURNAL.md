@@ -4,6 +4,36 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-30 — NeoPixel Stuck Beat 1 / Reset Freeze Fix & Detector SNR Threshold Calibration
+
+> [!NOTE] User Instructions & Guidance:
+> - *"seems like it's locked up,3 red lights on, even on reset"*
+
+### ADR 023: Resolving Stuck NeoPixel Red Lights on Reset & Click Detector Hypersensitivity
+- **Context**:
+  1. The user reported the device appeared frozen with 3 red lights on, persisting even when clicking reset or resetting the board.
+  2. Investigation revealed two compounding root causes:
+     - **Stuck 3 Red Lights Bug**: In Mode 1 (On-Beat), `render_beat_neopixels` illuminates pixels 1, 2, 3 in Red on odd beats (`beat_index % 2 == 1`), and pixels 4, 5, 6 on even beats. In `mode_engine.rs`, every single unconfirmed or outlier tap in search mode was executing `self.beat_index = 0`. The subsequent `fire_beat` immediately incremented it to 1, causing every candidate tap to illuminate pixels 1, 2, 3 and *never* alternating to 4, 5, 6.
+     - **Missing `led.off` on Reset & Coast Timeout**: When the user sent `r` / `R` or when candidate taps timed out without locking, `led.off(&dp.P0)` was never called. `led.active_color` remained `LedColor::Red`, which blocked the listening bar from starting (`led.active_color == LedColor::Off` check). As a result, pixels 1, 2, 3 stayed locked on solid red indefinitely.
+     - **Web Visualizer Simulation Lag**: In `metronome_live.html`, the NeoPixel DOM bar set pixels 1, 2, 3 to `#ef4444` when `LOCKED`, but had no cleanup when falling into `ACQUIRING` or `COASTING`, leaving the browser UI showing stuck red lights.
+     - **Acoustic Detector Self-Triggering**: Lowering `min_peak_threshold` to 65.0 with `attack_ratio = 1.35` and boosted PDM gain caused ambient room hum / laptop fan noise to trigger the click detector at the 120 ms refractory limit, continuously refreshing Beat 1.
+- **Decision**:
+  1. **Clean Hardware Clearing on Reset & Timeout**:
+     - Added `led.off(&dp.P0)` to `b'r'` in `main.rs` and to the candidate timeout handler.
+     - Resetting now instantly blanks all NeoPixels and initiates the soft Cyan radar listening bar.
+  2. **Removed Premature `beat_index` Resets in Search Mode**:
+     - `self.beat_index = 0` was removed from candidate interval adoption in `mode_engine.rs`. Candidate taps now alternate smoothly between left and right sides without latching to Beat 1.
+  3. **Calibrated Click Detector Parameters**:
+     - Adjusted `min_peak_threshold` from 65.0 to 75.0, `min_crest_factor` from 1.8 to 1.9, and `attack_ratio` from 1.35 to 1.40. Room hum is cleanly rejected while genuine acoustic metronome clicks (>150 peak, crest factor 3x–15x) trigger crisply.
+  4. **Web UI Live Animation Updates (`tools/metronome_live.html`)**:
+     - Updated NeoPixel bar simulation to animate the Cyan/Amber radar during `SCANNING` and `ACQUIRING`, and alternate the red pendulum on actual beat period intervals during `LOCKED`/`COASTING`. Clicking "Reset / Scan" immediately clears the UI bar to scanning.
+- **Verification**:
+  - All 15 host unit tests passed (`cargo test`).
+  - Compiled and deployed firmware to Seeed Studio XIAO nRF52840 Sense on `COM10`.
+  - HIL test passed all 7/7 checkpoints (`POWER_DIAG`, `MIC_POWER`, `MIC_DMA_STREAM`, `IMU_BUS`, `IMU_ACCEL`, `BLE_ADVERTISER`, `CAL_AND_READY`) in 1.12s.
+
+---
+
 ## 2026-10-30 — PLL Lock Hysteresis (Spurious Click Immunity), Dynamic Gain Display & Direct Keyboard Shortcuts
 
 > [!NOTE] User Instructions & Guidance:

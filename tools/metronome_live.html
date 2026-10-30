@@ -457,23 +457,37 @@
       if (mThresh) valThresh.textContent = mThresh[1];
     }
 
-    // Scanning radar simulation on NeoPixels while in SCANNING mode
+    // Scanning radar & Beat Pendulum simulation on NeoPixels
     let scanHead = 0;
     let scanDir = 1;
+    let pendulumSide = 0; // 0 = left [1,2,3], 1 = right [4,5,6]
+    let lastBeatTick = Date.now();
+
     setInterval(() => {
-      if (statusIndicator.textContent === "SCANNING") {
+      const status = statusIndicator.textContent;
+      if (status === "SCANNING" || status === "ACQUIRING") {
+        const color = status === "ACQUIRING" ? "#f59e0b" : "#06b6d4";
         npPixels.forEach(p => { p.style.background = "#0f172a"; p.style.boxShadow = "none"; });
-        npPixels[scanHead].style.background = "#06b6d4";
-        npPixels[scanHead].style.boxShadow = "0 0 8px #06b6d4";
+        npPixels[scanHead].style.background = color;
+        npPixels[scanHead].style.boxShadow = `0 0 8px ${color}`;
         scanHead += scanDir;
         if (scanHead >= 7) scanDir = -1;
         if (scanHead <= 0) scanDir = 1;
-      } else if (statusIndicator.textContent === "LOCKED") {
-        // Mode 1 Red Pendulum
+      } else if (status === "LOCKED" || status === "COASTING") {
+        const bpm = parseFloat(valBpm.textContent) || 120.0;
+        const periodMs = (60.0 / bpm) * 1000.0;
+        const now = Date.now();
+        if (now - lastBeatTick >= periodMs) {
+          lastBeatTick = now;
+          pendulumSide = 1 - pendulumSide;
+        }
+
+        const activeColor = status === "COASTING" ? "#f59e0b" : "#ef4444";
         npPixels.forEach((p, i) => {
-          if (i >= 1 && i <= 3) {
-            p.style.background = "#ef4444";
-            p.style.boxShadow = "0 0 8px #ef4444";
+          const isLit = pendulumSide === 0 ? (i >= 1 && i <= 3) : (i >= 4 && i <= 6);
+          if (isLit) {
+            p.style.background = activeColor;
+            p.style.boxShadow = `0 0 8px ${activeColor}`;
           } else {
             p.style.background = "#0f172a";
             p.style.boxShadow = "none";
@@ -542,7 +556,10 @@
       }
     }
 
-    btnReset.addEventListener("click", () => sendKey("r"));
+    btnReset.addEventListener("click", () => {
+      sendKey("r");
+      parseScanning("[RESET] Immediate local reset");
+    });
     btnGain.addEventListener("click", () => sendKey("g"));
     btnCoast.addEventListener("click", () => sendKey("c"));
     btnDump.addEventListener("click", () => sendKey("d"));

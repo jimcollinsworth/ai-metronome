@@ -244,7 +244,6 @@ impl MetronomeModeEngine {
                         } else {
                             // Not locked: adopt new candidate interval
                             self.beat_period_sec = Some(interval);
-                            self.beat_index = 0;
                             self.locked_intervals = 1;
                             self.is_locked = false;
                             self.prev_dt_sec = Some(interval);
@@ -258,7 +257,6 @@ impl MetronomeModeEngine {
                     } else {
                         // Not locked: adopt new interval
                         self.beat_period_sec = Some(interval);
-                        self.beat_index = 0;
                         self.locked_intervals = 1;
                         self.is_locked = false;
                         self.prev_dt_sec = Some(interval);

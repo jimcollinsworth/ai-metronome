@@ -762,6 +762,7 @@ fn main() -> ! {
 
         // C. Poll autonomous PLL beat / upbeat scheduler
         let now_pll_sec = timer.now_sec(&dp.TIMER0);
+        let had_candidate_before_poll = mode_engine.beat_period_sec.is_some();
         let was_locked_before_poll = mode_engine.is_locked;
         if let Some(sched_flash) = mode_engine.poll(now_pll_sec) {
             let np_beat = if mode_engine.mode == MetronomeMode::Mode1OnBeat {
@@ -793,9 +794,13 @@ fn main() -> ! {
                 );
                 usb_send_bytes(&mut usb_dev, &mut serial, &mut timer, &dp.TIMER0, line.as_bytes());
             }
-        } else if was_locked_before_poll && !mode_engine.is_locked {
+        } else if (was_locked_before_poll || had_candidate_before_poll)
+            && !mode_engine.is_locked
+            && mode_engine.beat_period_sec.is_none()
+        {
             // Coasting timed out -> cleanly returned to listening state!
             last_reported_bpm = 0.0;
+            led.off(&dp.P0);
             led.reset_listening_bar();
             line.clear();
             let _ = writeln!(
@@ -888,6 +893,7 @@ fn main() -> ! {
                     mode_engine.reset_pattern();
                     click_detector.reset();
                     last_reported_bpm = 0.0;
+                    led.off(&dp.P0);
                     led.reset_listening_bar();
                     sleep_controller.notify_activity(now_sec);
                     line.clear();

@@ -50,6 +50,7 @@ Active backlog and task tracking for `ai-metronome` (Embedded Rust Firmware on S
 - [x] Filter out accidental desk bumps while locked and require deliberate triple shake (`TripleShake`)
 - [x] Fix PLL lock fragility: implement lock hysteresis against single stray acoustic outliers / echoes (prevents tempo hopping, requires two consecutive intervals to transition tempo while locked)
 - [x] Update live web dashboard (`tools/metronome_live.html`) with dynamic gain button label (`Gain: +X.X dB (g)`), coast button (`Coast: X (c)`), and direct keyboard control shortcuts
+- [x] Fix stuck NeoPixel 3 red lights on reset & candidate timeout (clean `led.off` and remove premature `beat_index` zeroing in search mode)
 - [x] Build standalone real-time Web Serial visualizer and diagnostics dashboard (`tools/metronome_live.html`)
 
 ---
