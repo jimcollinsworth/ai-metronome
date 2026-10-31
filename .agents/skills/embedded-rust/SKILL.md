@@ -121,12 +121,6 @@ Study these repositories as gold-standard references for clean architecture, idi
   - `probe-rs`: Sub-second flash programming and RTT terminal streaming without GDB.
   - `flip-link`: Zero-cost stack overflow linker setup.
 
-### 4. `tock/tock`
-- **URL**: [github.com/tock/tock](https://github.com/tock/tock)
-- **What It Teaches**:
-  - Production capability-based security in embedded systems.
-  - Pure Rust microkernel separating untrusted user-space applications (C, Rust, Lua) from privileged hardware capsules.
-
 ---
 
 ## 5. Development Diagnostics & Toolchain Standards

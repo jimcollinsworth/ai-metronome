@@ -57,6 +57,17 @@ Active backlog and task tracking for `ai-metronome` (Embedded Rust Firmware on S
 
 ## Next Tasks & Backlog
 
+- [ ] **Audio Listening & Analysis Modular Refactoring & Windows Test Harness**:
+  - Analyze functionality and APIs in the current audio detection and beat tracking code (`click_detector.rs`, `mode_engine.rs`, and `main.rs` pipeline) to determine the optimal modular boundary.
+  - **Objective**: Package audio listening, transient onset detection, and rhythm analysis into a portable, platform-independent module (zero-allocation `#![no_std]` capable) that can run against recorded/synthetic audio data files on Windows and compile directly into the on-device firmware (XIAO nRF52840 Sense).
+  - **Phase 1: Standalone Module & Windows Test Harness (Safe Host Verification)**:
+    - [ ] Analyze current functionality/APIs and design clean programming interfaces for audio stream ingestion, transient filtering, adaptive noise floor tracking, and tempo/PLL analysis.
+    - [ ] Create the standalone module alongside a minimal Windows test harness implementing the planned APIs.
+    - [ ] Build comprehensive unit tests and automated test suites feeding audio data files (WAV / raw PCM) on Windows to thoroughly validate detection accuracy, candidate locking, refractory gating, and edge cases in isolation before touching device firmware.
+  - **Phase 2: Firmware Decoupling & Target Integration**:
+    - [ ] Refactor and extract the audio listening and analysis logic from the existing firmware.
+    - [ ] Integrate the verified standalone module into the XIAO nRF52840 Sense target firmware.
+    - [ ] Verify end-to-end PDM EasyDMA ingestion, timing determinism, zero-allocation safety, and test parity between Windows host tests and on-device execution.
 - [ ] Reassess Real-Time OS (RTOS) architecture for firmware development: evaluate **Embassy** (async Rust) vs. **Zephyr RTOS** vs. bare-metal polling for task concurrency, PDM DMA ring-buffering, low-power WFI scheduling, and TinyML expansion
 - [ ] Setup Rust and Embedded Development skills, curate reference patterns, and collect examples of professional, well-crafted embedded Rust codebases
 - [ ] Shake-to-sleep and shake-to-wake gesture recognition (triple shake)

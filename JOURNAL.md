@@ -4,6 +4,30 @@ Chronological record of milestones, architectural decisions, user steering, and 
 
 ---
 
+## 2026-10-30 — Backlog Addition: Two-Phase Audio Listening & Analysis Refactoring Architecture
+
+> [!NOTE] User Instructions & Guidance:
+> - *"Add a new task to the backlog to analyze the functionality and APIs in the current code and figure out the best way to refactor code. I want to specifically get the audio listening and analysis code into a module that can be tested against data files on my Windows machine and shared with the code when running on our device. We can do this in two phases, with the first phase being creating the standalone module along with a minimal test harness for use on Windows with the planned programming APIs so we can test that along with unit tests and automated tests for just that component before we try to pull code out of the current system, which would be the second step."*
+
+### Architectural Proposal: Two-Phase Decoupled Audio Module & Host-Driven Test Harness
+- **Context & Motivation**:
+  - The core audio listening pipeline (high-pass filtering, dynamic noise floor estimation, crest factor gating, and PLL/tempo tracking) is currently split across `click_detector.rs`, `mode_engine.rs`, and the `main.rs` 200 Hz event loop.
+  - Developing and verifying audio DSP and transient detection algorithms directly on embedded hardware (`XIAO nRF52840 Sense`) introduces compile-flash-listen cycle friction and limits repeatable automated regression testing against recorded piano/metronome audio datasets.
+  - Isolating the audio listening and analysis functionality into a shared, platform-independent `#![no_std]` core module allows testing against real audio data files on Windows with rapid iteration, while ensuring seamless sharing with target hardware.
+- **Two-Phase Implementation Strategy**:
+  - **Phase 1: Standalone Module & Windows Test Harness**:
+    - Audit current APIs and design clean, decoupled interfaces for audio streaming/ingestion, transient detection, and rhythm analysis.
+    - Implement the standalone module and a lightweight Windows test harness.
+    - Write comprehensive unit tests and automated test runners that ingest test audio files (raw PCM / WAV) to validate detection accuracy, tempo tracking, refractory gates, and edge cases prior to touching production firmware.
+  - **Phase 2: Firmware Decoupling & Target Integration**:
+    - Refactor and extract the audio listening and analysis code from the active firmware.
+    - Wire the shared standalone module into the on-device firmware on the XIAO nRF52840 Sense.
+    - Validate EasyDMA streaming into the module, zero-allocation runtime constraints, and parity between Windows host tests and physical device behavior.
+- **Backlog Tracking**:
+  - Added to [`PLANNING.md`](file:///c:/Users/jimco/Projects/ai-metronome/PLANNING.md) under **Next Tasks & Backlog**.
+
+---
+
 ## 2026-10-30 — Backlog Addition: Embedded Rust Development Skill & Reference Architecture Setup
 
 > [!NOTE] User Instructions & Guidance:
@@ -20,7 +44,6 @@ Chronological record of milestones, architectural decisions, user steering, and 
      - `embassy-rs/embassy`: Native async drivers for nRF52840 (PDM, USB, PWM, TWIM).
      - `embassy-rs/trouble`: Modern, pure-Rust BLE 5.0 Host/Controller stack without vendor blobs.
      - `knurling-rs` (Ferrous Systems): `defmt`, `probe-rs`, and `flip-link` production workflows.
-     - `tock/tock`: Capability-based secure microkernel architecture in Rust.
   3. **Backlog Tracking**:
      - Updated [`PLANNING.md`](file:///c:/Users/jimco/Projects/ai-metronome/PLANNING.md) with ongoing tasks for reference pattern evaluation.
 
